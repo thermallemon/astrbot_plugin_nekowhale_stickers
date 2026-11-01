@@ -41,7 +41,7 @@ from .semantic import DEFAULT_MIN_SIM, DEFAULT_RECALL_K, SemanticPicker
 from .sticker_index import StickerIndex, norm_packs
 
 PLUGIN_NAME = "astrbot_plugin_nekowhale_stickers"
-PLUGIN_VERSION = "2.3.1"
+PLUGIN_VERSION = "2.3.2"
 SITE = "https://kiriyuki.com"
 
 # 模型自己把表情发出去时会用到的工具名（含 MCP 那边的名字，避免重复发）
@@ -132,7 +132,10 @@ class NekoWhaleStickers(Star):
         self._recent: dict[str, deque[str]] = defaultdict(
             lambda: deque(maxlen=int(self._cfg("recent_window", 12) or 12))
         )
-        self._cooldown: dict[str, int] = defaultdict(int)
+        # 最小间隔改成「真实秒数」：老版本是「回复条数」倒数，cooldown=1 等于
+        # 每两条回复必跳过一条，看起来就像「有时候不配图」。
+        self._last_sent_at: dict[str, float] = {}
+        self._cooldown_remain = 0.0
         self._skip_reason = "无"
         self._build_attempted = False
 
@@ -455,14 +458,26 @@ class NekoWhaleStickers(Star):
             return False
         return random.random() <= probability
 
+    def _cooldown_seconds(self) -> float:
+        """最小间隔（秒）。<=0 表示不限制。"""
+        try:
+            value = float(self._cfg("cooldown", 0) or 0)
+        except (TypeError, ValueError):
+            value = 0.0
+        return max(0.0, value)
+
     def _cooldown_blocked(self, umo: str) -> bool:
-        cooldown = int(self._cfg("cooldown", 1) or 0)
-        if cooldown <= 0:
+        gap = self._cooldown_seconds()
+        self._cooldown_remain = 0.0
+        if gap <= 0:
             return False
-        remain = self._cooldown.get(umo, 0)
+        last = self._last_sent_at.get(umo, 0.0)
+        if last <= 0:
+            return False
+        remain = gap - (time.time() - last)
         if remain <= 0:
             return False
-        self._cooldown[umo] = remain - 1
+        self._cooldown_remain = remain
         return True
 
     async def _choose(
@@ -470,12 +485,13 @@ class NekoWhaleStickers(Star):
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """语义优先，退化为关键词。返回 (表情, 决策信息)。"""
         selector = self._selector()
+        fallback = bool(self._cfg("fallback_to_keyword", True))
         if selector == "auto":
             # 自动：向量库已就绪就走向量；没就绪就立刻用关键词，
             # 不为了等建库把首条回复卡住（建库在后台继续跑）。
             if self._picker.ready:
                 selector = "semantic"
-            elif bool(self._cfg("fallback_to_keyword", True)):
+            elif fallback:
                 selector = "keyword"
             else:
                 selector = "semantic"
@@ -488,6 +504,7 @@ class NekoWhaleStickers(Star):
                     logger.warning(f"[nekowhale] 等待建向量没等到：{e}")
             elif not self._build_attempted:
                 self._build_attempted = await self._build_vectors()
+        info: dict[str, Any] = {}
         if selector in {"semantic", "auto"} and self._picker.ready:
             item, info = await self._picker.pick(
                 self._index.items,
@@ -495,10 +512,15 @@ class NekoWhaleStickers(Star):
                 reply_text=reply_text,
                 recent=list(self._recent[umo]),
             )
-            if item is None:
-                self._skip_reason = f"语义未选中（{info.get('stage')}, sim={info.get('sim')}）"
-            return item, info
-        if selector == "keyword" or bool(self._cfg("fallback_to_keyword", True)):
+            if item is not None:
+                return item, info
+            self._skip_reason = f"语义未选中（{info.get('stage')}, sim={info.get('sim')}）"
+            if not fallback:
+                return None, info
+            # 语义这一层没给出结果时不要直接放弃，关键词还能兜一层，
+            # 否则 embedding provider 抖一下就会「这一条不配图」。
+            info = dict(info, stage=f"{info.get('stage')}→关键词兜底")
+        if selector == "keyword" or fallback:
             item = self._index.pick(
                 reply_text=reply_text,
                 user_text=user_text,
@@ -507,7 +529,10 @@ class NekoWhaleStickers(Star):
             )
             if item is None:
                 self._skip_reason = "关键词也没挑到"
-            return item, {"stage": "keyword", "sim": 0.0}
+                return None, {"stage": "keyword-empty", "sim": 0.0}
+            if not info:
+                info = {"stage": "keyword", "sim": 0.0}
+            return item, info
         self._skip_reason = "语义向量未就绪且未开启关键词兜底"
         return None, {"stage": "semantic-not-ready"}
 
@@ -617,11 +642,16 @@ class NekoWhaleStickers(Star):
         return ctx
 
     async def _inline(self, event: AstrMessageEvent, ctx: dict[str, Any]) -> None:
-        if self._should_skip(event) or not self._roll():
+        self._skip_reason = "无"
+        if self._should_skip(event):
+            logger.debug(f"[nekowhale] 跳过（{self._skip_reason}）")
+            return
+        if not self._roll():
+            logger.debug("[nekowhale] 跳过（概率没中）")
             return
         umo = event.unified_msg_origin
         if self._cooldown_blocked(umo):
-            logger.info(f"[nekowhale] {umo} 跳过（最小间隔）")
+            logger.info(f"[nekowhale] {umo} 跳过（最小间隔，还剩 {self._cooldown_remain:.1f}s）")
             return
         result = event.get_result()
         if result is None:
@@ -637,7 +667,7 @@ class NekoWhaleStickers(Star):
             return
         result.chain.append(Image.fromFileSystem(str(path)))
         self._recent[umo].append(str(item["id"]))
-        self._cooldown[umo] = int(self._cfg("cooldown", 1) or 0)
+        self._last_sent_at[umo] = time.time()
         event.set_extra(EXTRA_PICKED, True)
         self._log_pick(umo, item, info)
 
@@ -653,16 +683,22 @@ class NekoWhaleStickers(Star):
         ctx = event.get_extra(EXTRA_CTX)
         event.set_extra(EXTRA_CTX, None)
         if not ctx:
+            # 命令回执、纯图片回复、正文被去重清空都会走到这里，
+            # 默认级别不打日志，排查时把日志调到 DEBUG 就能看到。
+            logger.debug("[nekowhale] 跳过（这一轮没有可配图的回复正文）")
             return
         if self._mode() != "after_send":
             return
+        self._skip_reason = "无"
         if self._should_skip(event):
+            logger.debug(f"[nekowhale] 跳过（{self._skip_reason}）")
             return
         if not self._roll():
+            logger.debug("[nekowhale] 跳过（概率没中）")
             return
         umo = event.unified_msg_origin
         if self._cooldown_blocked(umo):
-            logger.info(f"[nekowhale] {umo} 跳过（最小间隔）")
+            logger.info(f"[nekowhale] {umo} 跳过（最小间隔，还剩 {self._cooldown_remain:.1f}s）")
             return
         started = time.time()
         item, info = await self._choose(umo, ctx["user_text"], ctx["reply_text"])
@@ -675,7 +711,7 @@ class NekoWhaleStickers(Star):
         if not await self._deliver(event, item):
             return
         self._recent[umo].append(str(item["id"]))
-        self._cooldown[umo] = int(self._cfg("cooldown", 1) or 0)
+        self._last_sent_at[umo] = time.time()
         event.set_extra(EXTRA_PICKED, True)
         self._log_pick(umo, item, info)
 

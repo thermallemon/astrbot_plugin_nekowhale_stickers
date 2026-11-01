@@ -40,7 +40,7 @@ except ImportError:  # 独立跑（不带 AstrBot）时退化到标准 logging
 
     logger = logging.getLogger("nekowhale")
 
-PLUGIN_VERSION = "2.3.1"
+PLUGIN_VERSION = "2.3.2"
 USER_AGENT = f"astrbot-plugin-nekowhale-stickers/{PLUGIN_VERSION} (+https://kiriyuki.com)"
 
 KIT_MANIFEST = "/api/kit/nekowhale"
