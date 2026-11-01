@@ -84,7 +84,8 @@ class StickerIndex:
         max_bytes: int = 3_000_000,
         exclude_emotions: list[str] | None = None,
         fallback_emotions: list[str] | None = None,
-        penalize_direction: bool = True,
+        penalize_direction: bool = False,
+        dual_weight: float = 0.85,
         enabled_packs: list[str] | None = None,
     ) -> None:
         self.data_dir = Path(data_dir).expanduser()
@@ -93,7 +94,14 @@ class StickerIndex:
         self.max_bytes = int(max_bytes or 0)
         self.exclude_emotions = set(exclude_emotions or [])
         self.fallback_emotions = list(fallback_emotions or DEFAULT_FALLBACK_EMOTIONS)
-        self.penalize_direction = bool(penalize_direction)
+        # 双人表情（标注里有 dir 的那些）降权系数；兼容老配置的布尔 penalize_direction。
+        try:
+            weight = float(dual_weight)
+        except (TypeError, ValueError):
+            weight = 0.85
+        if penalize_direction and weight >= 0.999:
+            weight = 0.85
+        self.dual_weight = min(1.0, max(0.05, weight))
         self.enabled_packs = norm_packs(enabled_packs)
 
         self.items: list[dict[str, Any]] = []
@@ -234,8 +242,8 @@ class StickerIndex:
         scored: list[tuple[float, dict[str, Any]]] = []
         for item in pool:
             score = self._score_one(item, text) or 0.1
-            if self.penalize_direction and item.get("dir") and len(self.enabled_packs) < 2:
-                score *= 0.85
+            if item.get("dir"):
+                score *= self.dual_weight
             scored.append((score, item))
         scored.sort(key=lambda x: x[0], reverse=True)
         return scored

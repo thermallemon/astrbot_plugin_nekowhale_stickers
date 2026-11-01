@@ -8,7 +8,7 @@ nekowhale 素材自带 emotion / tags / use / desc 人工标注，直接拿来�
         ↓ bge-m3 (SiliconFlow)
     316 张表情向量里取 top-k 相似
         ↓ deepseek-flash（结构化判断：这张图放到这句对话后面，像不像人顺手甩的）
-    选中一张（pick>=1）/ 只在对方说非常沉重的事时才不选（pick=0）
+    选中一张（pick>=1）；模型偶尔返回 0 时退回向量 top1，保证每条回复都有图
 
 为什么两段式：单靠向量 top1 会挑出「情绪对但事情不对」的图（实测「你知道你会
 发表情包吗」会被召回成「嘲笑」），加一层 LLM 复核能把错误率压下去，代价是每条
@@ -81,11 +81,9 @@ SYSTEM_PROMPT = """你是表情包挑选器。输入是一段聊天（用户说�
 任务：挑一张紧跟着我这条回复发出去的图。它要像人聊天时顺手甩的一张图，不是硬凑。
 
 判断标准：
-1. 每条回复都要配一张，所以必须从候选里挑一张。即使这段对话是在讲正事、答技术问题、给操作说明、汇报情况，也照样要挑——这时候选语气中性、动作简单、不抢戏的图（听着、点头、思考、摊手之类），别选大喊大叫的。
-2. 候选图上的动作或文字，要和这段对话说的**同一件事**有关，或者正好是这个情绪的反应。只是「都是开心」「都是疑惑」不算贴切。
-3. 满足第 2 条的前提下选最贴切的那张。名次靠前通常更贴切，但不要只因为名次靠前就选。
-4. 只有一种情况允许不选（pick 填 0）：对方明显在说非常沉重的事——亲人去世、重病、吵架分手这类，发任何表情都会失礼。除了这种场合，不要填 0。
-5. 已经从最近发过的图里排除了，不用考虑重复。
+1. 候选图上的动作或文字，要和这段对话说的**同一件事**有关，或者正好是这个情绪的反应。只是「都是开心」「都是疑惑」不算贴切。
+2. 在满足第 1 条的前提下选最贴切的那张。名次靠前通常更贴切，但不要只因为名次靠前就选。
+3. 最近已经发过的图已经排除了，不用考虑重复。
 
 只输出 JSON，不要解释：{"pick": <候选项序号>, "why": "<15 字以内理由>", "feel": "<情绪词>"}"""
 
@@ -177,6 +175,7 @@ class SemanticPicker:
         min_sim: float = DEFAULT_MIN_SIM,
         rerank_timeout: float = 3.0,
         llm_enabled: bool = True,
+        weight_fn: Any = None,
     ) -> None:
         self.context = context
         self.embedding_provider_id = (embedding_provider_id or "").strip()
@@ -186,6 +185,8 @@ class SemanticPicker:
         self.min_sim = float(min_sim if min_sim is not None else DEFAULT_MIN_SIM)
         self.rerank_timeout = float(rerank_timeout or 3.0)
         self.llm_enabled = bool(llm_enabled)
+        # 可选的逐条权重（比如给双人表情降权）：签名 item -> 0..1 的系数
+        self.weight_fn = weight_fn
 
         self._vec_by_id: dict[str, np.ndarray] = {}
         self._ids: list[str] = []
@@ -193,6 +194,7 @@ class SemanticPicker:
         self._fingerprint = ""
         self._matrix: np.ndarray | None = None
         self._rows: list[dict[str, Any]] = []
+        self._row_weights: np.ndarray | None = None
         self._matrix_key = ""
         self._building = False
         self._lock = asyncio.Lock()
@@ -428,6 +430,17 @@ class SemanticPicker:
             vecs.append(vec)
         self._rows = rows
         self._matrix = np.vstack(vecs) if vecs else None
+        self._row_weights = None
+        if rows and self.weight_fn is not None:
+            try:
+                weights = [
+                    float(self.weight_fn(it))
+                    for it in rows
+                ]
+                self._row_weights = np.asarray(weights, dtype=np.float32)
+            except Exception:
+                self._row_weights = None
+                logger.warning("[nekowhale] 计算逐条权重失败，按原始相似度排序")
         self._matrix_key = key
 
     # --------------------------------------------------------------- recall
@@ -448,6 +461,8 @@ class SemanticPicker:
         if self._matrix is None:
             return []
         sims = self._matrix @ query_vec
+        if self._row_weights is not None:
+            sims = sims * self._row_weights
         order = np.argsort(-sims)
         picked: list[tuple[float, dict[str, Any]]] = []
         for idx in order:
@@ -586,9 +601,12 @@ class SemanticPicker:
             return chosen, info
 
         if pick == 0:
-            # 只有模型判定「对方在说非常沉重的事」才允许不发（见 SYSTEM_PROMPT 第 4 条）
-            info["stage"] = "llm-solemn"
-            return None, info
+            # 不再有「判定为沉重话题就不发」的分支：模型偶尔还是会返回 0，
+            # 这种情况下退到向量 top1，保证每条回复都有图（正常配图）。
+            chosen = cands[0][1]
+            info["stage"] = "llm-zero-top1"
+            info["pick"] = str(chosen.get("id"))
+            return chosen, info
 
         # 解析失败 / 超时 / 模型没给序号：退到向量 top1，保证每条回复都有图
         chosen = cands[0][1]

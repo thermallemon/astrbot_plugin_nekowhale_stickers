@@ -40,7 +40,7 @@ except ImportError:  # 独立跑（不带 AstrBot）时退化到标准 logging
 
     logger = logging.getLogger("nekowhale")
 
-PLUGIN_VERSION = "2.2.1"
+PLUGIN_VERSION = "2.3.0"
 USER_AGENT = f"astrbot-plugin-nekowhale-stickers/{PLUGIN_VERSION} (+https://kiriyuki.com)"
 
 KIT_MANIFEST = "/api/kit/nekowhale"
@@ -59,6 +59,24 @@ class FetchError(RuntimeError):
 
 def _sha1_prefix(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()[:12]
+
+
+def _replace(src: Path, dst: Path, tries: int = 10) -> None:
+    """原子替换，且对 Windows 的文件占用做退避重试。
+
+    Windows 上 os.replace 只要目标文件被任何进程（哪怕只是读）打开着，
+    就会抛 PermissionError [WinError 5]；而机器人发图时正好会短暂打开同一个
+    gif。Linux 上是原子的、不会出现这种情况，所以这里统一兜一层。
+    """
+    last: Exception | None = None
+    for i in range(max(1, tries)):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as e:  # 目标被占用：等一会儿再来
+            last = e
+            time.sleep(min(0.02 * (2 ** i), 0.5))
+    raise FetchError(f"写入 {dst.name} 失败（文件正被其它程序占用）：{last}")
 
 
 def _human(size: float) -> str:
@@ -107,7 +125,7 @@ class KitFetcher:
             self.dir.mkdir(parents=True, exist_ok=True)
             tmp = self._state_file.with_suffix(".json.part")
             tmp.write_text(json.dumps(self._state, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, self._state_file)
+            _replace(tmp, self._state_file)
         except Exception as e:
             logger.debug(f"[nekowhale] 写状态文件失败：{e}")
 
@@ -197,7 +215,7 @@ class KitFetcher:
             self.dir.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".json.part")
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)
+            _replace(tmp, path)
             self._state["manifest_etag"] = new_etag
             self._state["manifest_at"] = time.time()
             self._state["manifest_version"] = data.get("version")
@@ -253,7 +271,7 @@ class KitFetcher:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".json.part")
             tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-            os.replace(tmp, path)
+            _replace(tmp, path)
             self._state["meta_etag"] = new_etag
             self._state["meta_at"] = time.time()
             self._write_state()
@@ -290,6 +308,20 @@ class KitFetcher:
         except OSError:
             return False
 
+    @staticmethod
+    def _write_atomic(path: Path, body: bytes, tmp: Path | None = None) -> None:
+        """写临时文件再改名（放到线程里跑，别卡事件循环）。"""
+        tmp = tmp or path.with_suffix(path.suffix + ".part")
+        try:
+            tmp.write_bytes(body)
+            _replace(tmp, path)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
     async def ensure_sticker(self, item: dict[str, Any], verify: bool = True) -> Path:
         """确保这张表情在本地，返回本地路径。并发调用同一张只会下载一次。"""
         path = self.sticker_path(item)
@@ -310,8 +342,7 @@ class KitFetcher:
                     if verify and expect and _sha1_prefix(body) != expect:
                         raise FetchError(f"哈希对不上（{item.get('id')}）")
                     tmp = path.with_suffix(path.suffix + ".part")
-                    tmp.write_bytes(body)
-                    os.replace(tmp, path)
+                    await asyncio.to_thread(self._write_atomic, path, body, tmp)
                     self.downloaded += 1
                     self.downloaded_bytes += len(body)
                     logger.info(
@@ -351,7 +382,7 @@ class KitFetcher:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".part")
             tmp.write_bytes(body)
-            os.replace(tmp, path)
+            _replace(tmp, path)
             return body
 
     async def json_of(self, rel: str) -> dict[str, Any]:

@@ -41,7 +41,7 @@ from .semantic import DEFAULT_MIN_SIM, DEFAULT_RECALL_K, SemanticPicker
 from .sticker_index import StickerIndex, norm_packs
 
 PLUGIN_NAME = "astrbot_plugin_nekowhale_stickers"
-PLUGIN_VERSION = "2.2.1"
+PLUGIN_VERSION = "2.3.0"
 SITE = "https://kiriyuki.com"
 
 # 模型自己把表情发出去时会用到的工具名（含 MCP 那边的名字，避免重复发）
@@ -57,6 +57,29 @@ STICKER_TOOLS = {
 EXTRA_SENT = "_nekowhale_already_sent"
 EXTRA_PICKED = "_nekowhale_picked"
 EXTRA_CTX = "_nekowhale_ctx"
+
+# 配置面板里的下拉项用中文（AstrBot 的 options 只能是纯字符串，没有 label/value 之分），
+# 所以这里做一层「中文值 → 内部值」的映射；旧的英文值继续兼容。
+SELECTOR_ALIASES = {
+    "向量选图": "semantic",
+    "语义选图": "semantic",
+    "semantic": "semantic",
+    "关键词选图": "keyword",
+    "关键词": "keyword",
+    "keyword": "keyword",
+    "自动": "auto",
+    "auto": "auto",
+}
+SELECTOR_LABELS = {"semantic": "向量选图", "keyword": "关键词选图", "auto": "自动"}
+MODE_LABELS = {"after_send": "正文后补一张", "inline": "图文一起发"}
+MODE_ALIASES = {
+    "正文后补一张": "after_send",
+    "先发正文再补图": "after_send",
+    "after_send": "after_send",
+    "图文一起发": "inline",
+    "随正文一起": "inline",
+    "inline": "inline",
+}
 
 TOOL_TEXTS_KEY = "_send_message_to_user_current_session_plain_texts"
 EXTRA_TOOL_TEXTS = "_nekowhale_tool_texts"
@@ -99,7 +122,6 @@ class NekoWhaleStickers(Star):
             self._renderer = MemeRenderer(
                 self._kit,
                 cache_dir=self._data_dir,
-                watermark=bool(self._cfg("meme_watermark", False)),
             )
 
         self._index = self._make_index({}, {})
@@ -123,6 +145,7 @@ class NekoWhaleStickers(Star):
             min_sim=float(self._cfg("min_sim", DEFAULT_MIN_SIM)),
             rerank_timeout=float(self._cfg("rerank_timeout", 6.0) or 6.0),
             llm_enabled=bool(self._cfg("llm_rerank", True)),
+            weight_fn=self._item_weight,
         )
         self._vector_task: asyncio.Task | None = None
         self._warm_task: asyncio.Task | None = None
@@ -139,10 +162,12 @@ class NekoWhaleStickers(Star):
         return default if value is None else value
 
     def _mode(self) -> str:
-        return str(self._cfg("mode", "after_send") or "after_send").strip().lower()
+        raw = str(self._cfg("mode", "after_send") or "after_send").strip()
+        return MODE_ALIASES.get(raw, MODE_ALIASES.get(raw.lower(), "after_send"))
 
     def _selector(self) -> str:
-        return str(self._cfg("selector", "semantic") or "semantic").strip().lower()
+        raw = str(self._cfg("selector", "自动") or "自动").strip()
+        return SELECTOR_ALIASES.get(raw, SELECTOR_ALIASES.get(raw.lower(), "auto"))
 
     def _resolve_data_dir(self) -> Path:
         """素材目录：显式配置 > 插件数据目录 > 老位置（已经在用的机器不重下 388MB）。"""
@@ -170,15 +195,35 @@ class NekoWhaleStickers(Star):
             logger.warning(f"[nekowhale] 向量缓存改用系统临时目录：{e}")
             return str(Path(tempfile.gettempdir()) / ".astrbot" / "nekowhale_cache")
 
+    def _max_bytes(self) -> int:
+        """配置里用 MB 表示（max_size_mb），内部一律换成字节。"""
+        try:
+            mb = float(self._cfg("max_size_mb", 3.0) or 0)
+        except (TypeError, ValueError):
+            mb = 3.0
+        return max(0, int(round(mb * 1024 * 1024)))
+
+    def _dual_weight(self) -> float:
+        """双人表情（有 dir 字段的那些）的权重系数，1.0 = 不降权。"""
+        try:
+            weight = float(self._cfg("dual_weight", 0.85))
+        except (TypeError, ValueError):
+            weight = 0.85
+        return min(1.0, max(0.05, weight))
+
+    def _item_weight(self, item: dict[str, Any]) -> float:
+        """语义检索时给单条表情乘的系数（双人表情按配置降权）。"""
+        return self._dual_weight() if item.get("dir") else 1.0
+
     def _make_index(self, manifest: dict[str, Any], meta: dict[str, Any]) -> StickerIndex:
         return StickerIndex(
             data_dir=self._data_dir,
             manifest=manifest,
             meta=meta,
-            max_bytes=self._cfg("max_bytes", 3_000_000),
+            max_bytes=self._max_bytes(),
             exclude_emotions=self._cfg("exclude_emotions", []),
             fallback_emotions=self._cfg("fallback_emotions", None),
-            penalize_direction=self._cfg("penalize_direction", True),
+            dual_weight=self._dual_weight(),
             enabled_packs=norm_packs(self._cfg("enabled_packs", ["大肥鱼"])),
         )
 
@@ -300,8 +345,6 @@ class NekoWhaleStickers(Star):
             return
         if self._selector() != "keyword" and not self._picker.ready:
             await self._warm_when_ready()
-        if bool(self._cfg("prefetch_on_start", True)):
-            await self.prefetch(int(self._cfg("prefetch_count", 6) or 0))
 
     async def _warm_when_ready(self) -> None:
         for _ in range(30):
@@ -427,6 +470,15 @@ class NekoWhaleStickers(Star):
     ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
         """语义优先，退化为关键词。返回 (表情, 决策信息)。"""
         selector = self._selector()
+        if selector == "auto":
+            # 自动：向量库已就绪就走向量；没就绪就立刻用关键词，
+            # 不为了等建库把首条回复卡住（建库在后台继续跑）。
+            if self._picker.ready:
+                selector = "semantic"
+            elif bool(self._cfg("fallback_to_keyword", True)):
+                selector = "keyword"
+            else:
+                selector = "semantic"
         if selector in {"semantic", "auto"} and not self._picker.ready:
             task = self._vector_task
             if task and not task.done():
@@ -651,7 +703,8 @@ class NekoWhaleStickers(Star):
             f"素材目录：{kit['dir']}",
             f"标注：{'已载入' if stats['meta_found'] else '缺失'}｜"
             f"启用的包：{'、'.join(stats['packs']) or '全部'}（清单共 {stats['known']} 张）",
-            f"选图：{self._selector()} / 模式 {self._mode()} / 概率 {self._cfg('probability', 1.0)}",
+            f"选图：{SELECTOR_LABELS.get(self._selector(), self._selector())} / 模式 {MODE_LABELS.get(self._mode(), self._mode())} / 概率 {self._cfg('probability', 1.0)}",
+            f"体积上限：{self._max_bytes() // 1048576}MB｜双人表情权重：{self._dual_weight():.2f}",
             f"向量：{'就绪' if sem['ready'] else '未就绪'} "
             f"{sem['vectors']} 张 dim={sem['dim']}（{sem['model'] or '未建库'}）",
             f"精选模型：{sem['rerank_provider'] or '关闭'}（{'开' if sem['llm'] else '关'}）",

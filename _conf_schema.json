@@ -8,23 +8,23 @@
   "selector": {
     "type": "string",
     "description": "选图方式",
-    "hint": "semantic：向量召回 + 模型精选（推荐，挑不出就跳过）；keyword：旧的关键词打分（几乎等于随机，只在向量没建好时兜底）；auto：能用向量就用向量，向量没建好时退关键词。",
+    "hint": "自动（默认）：向量库已就绪就用向量召回 + 模型精选，还没建好就先走关键词，不卡首条回复；向量选图：坚持用向量（没建好会等，等到就绪为止）；关键词选图：旧的关键词打分（零 token，几乎等于随机，适合不想花模型 token 的机器）。",
     "options": [
-      "semantic",
-      "keyword",
-      "auto"
+      "自动",
+      "向量选图",
+      "关键词选图"
     ],
-    "default": "semantic"
+    "default": "自动"
   },
   "mode": {
     "type": "string",
     "description": "发送时机",
-    "hint": "after_send：正文先发出去，再单独补一条表情（推荐，不拖慢回复）；inline：表情拼进消息链，和正文一起发，但选图耗时会让回复晚半秒到一秒。",
+    "hint": "正文后补一张：正文先发出去，再单独补一条表情（推荐，不拖慢回复）；图文一起发：表情拼进消息链跟正文一起发，但选图会让回复晚半秒到一秒。",
     "options": [
-      "after_send",
-      "inline"
+      "正文后补一张",
+      "图文一起发"
     ],
-    "default": "after_send"
+    "default": "正文后补一张"
   },
   "probability": {
     "type": "float",
@@ -45,7 +45,9 @@
     "items": {
       "type": "string"
     },
-    "default": ["大肥鱼"]
+    "default": [
+      "大肥鱼"
+    ]
   },
   "embedding_provider_id": {
     "type": "string",
@@ -118,18 +120,6 @@
     "hint": "留空则从官方站拉取并缓存（推荐）。填了但文件不存在会退化成只用文件名匹配。",
     "default": ""
   },
-  "prefetch_on_start": {
-    "type": "bool",
-    "description": "启动时预热几张",
-    "hint": "首次装好之后，趁没人说话先下几张常用的，免得第一条回复要等下载。默认开。",
-    "default": true
-  },
-  "prefetch_count": {
-    "type": "int",
-    "description": "预热张数",
-    "hint": "默认 6。每张约 0.3~0.7MB，6 张大约 3MB。",
-    "default": 6
-  },
   "download_timeout": {
     "type": "float",
     "description": "下载超时（秒）",
@@ -148,22 +138,16 @@
     "hint": "把一句话贴进表情里生成新 GIF（想/举牌/葱卷/对联/抱）。需要 Pillow 和 numpy，AstrBot 自带。",
     "default": true
   },
-  "meme_watermark": {
-    "type": "bool",
-    "description": "贴字表情加水印",
-    "hint": "在生成的图左下角加一行「用户生成」。默认关。",
-    "default": false
-  },
-  "max_bytes": {
-    "type": "int",
-    "description": "单张体积上限（字节）",
-    "hint": "超过这个体积的表情不会进入候选池。默认 3000000（约 2.9MB），可避免发出 5MB 的大图。",
-    "default": 3000000
+  "max_size_mb": {
+    "type": "float",
+    "description": "单张体积上限（MB）",
+    "hint": "超过这个大小的表情不会进入候选池。默认 3 MB，可避免发出 5MB 的大图。",
+    "default": 3.0
   },
   "top_n": {
     "type": "int",
     "description": "关键词模式的候选数量",
-    "hint": "只在 selector=keyword 时有意义：打分后取前 N 张里随机挑一张。默认 6。",
+    "hint": "只在「关键词选图」时有意义：打分后取前 N 张里随机挑一张。默认 6。",
     "default": 6
   },
   "recent_window": {
@@ -178,11 +162,11 @@
     "hint": "发过一张表情后，同一个会话接下来的 N 条回复不再配图，避免刷屏。默认 1 表示不连着发；填 0 关闭限制。",
     "default": 1
   },
-  "penalize_direction": {
-    "type": "bool",
-    "description": "降低双人表情权重",
-    "hint": "只影响关键词模式。双人表情带有方向标注，单人群聊里容易突兀，命中时权重乘以 0.85。",
-    "default": true
+  "dual_weight": {
+    "type": "float",
+    "description": "双人表情权重",
+    "hint": "双人表情（大肥鱼和GPT娘那种带方向标注的）命中时相似度/得分乘以这个系数。1.0 = 不降权；0.85 = 稍微少出现（默认）；0.5 = 明显少出现；0.05 = 基本不出现。",
+    "default": 0.85
   },
   "exclude_emotions": {
     "type": "list",
@@ -196,7 +180,7 @@
   "fallback_emotions": {
     "type": "list",
     "description": "关键词模式的兜底类别",
-    "hint": "只在 selector=keyword 时使用。留空使用内置默认（其他、开心、搞怪、卖萌、打招呼、赞同、惊讶）。",
+    "hint": "只在「关键词选图」时使用。留空使用内置默认（其他、开心、搞怪、卖萌、打招呼、赞同、惊讶）。",
     "items": {
       "type": "string"
     },

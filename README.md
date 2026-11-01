@@ -1,13 +1,19 @@
+<p align="center">
+  <img src="logo.png" width="160" alt="大肥鱼表情包">
+</p>
+
 # 大肥鱼表情包 · astrbot_plugin_nekowhale_stickers
 
 让 Bot 说话自带表情包，还能把一句话贴进表情里画一张新的。
 
-插件**只含代码**，不含任何表情文件：清单、标注、GIF 全部在运行时按需从
-[kiriyuki.com](https://kiriyuki.com) 拉取，用到哪张下哪张。
+插件**只含代码**（约 120 KB），**不含任何表情文件**：清单、标注、GIF 全部在运行时
+按需从 [kiriyuki.com](https://kiriyuki.com) 拉取，用到哪张下哪张。
 
 > 素材署名：表情作者 B站 **可以叫我云大人**（<https://space.bilibili.com/103739>），
 > kiriyuki.com 制作。形象基于 ZipZipPipe 与 上善无形。
 > 完整许可见 [NOTICE](NOTICE) 与 [LICENSE-ASSETS](LICENSE-ASSETS)。
+
+---
 
 ## 安装
 
@@ -18,7 +24,7 @@ https://gitee.com/in1t1a1/astrbot_plugin_nekowhale_stickers
 ```
 
 > 注意别用「从链接安装」：那个入口是给 GitHub 归档地址用的，会用 httpx 直接下载 zip；
-> Gitee 对这类请求有反爬（返回的是 47KB 的 JS 挑战页），会报「插件压缩包格式错误」。
+> Gitee 对这类请求有反爬（返回的是 47 KB 的 JS 挑战页），会报「插件压缩包格式错误」。
 > 顶部那个「Git 克隆」入口走 `git` 命令，Gitee 完全支持。
 
 **方式二**：下载仓库 zip（`https://gitee.com/in1t1a1/astrbot_plugin_nekowhale_stickers/repository/archive/main.zip`）
@@ -38,14 +44,14 @@ pip install fonttools brotli
 ## 装好之后
 
 ```text
-/表情自检        看清单、缓存、向量、贴字模板是否就绪
-/表情下载 6      预热 6 张（首装后自动做）
-/表情下载 全部   把整套下到本地（约 388MB，只在你想离线用时需要）
+/表情自检          看清单、缓存、向量、贴字模板是否就绪
+/表情下载 6        手动预热 6 张（不占启动时间）
+/表情下载 全部     把整套下到本地（约 388 MB，只在想离线用时需要）
 /表情图 想 今天不想上班
-/表情署名        看作者与许可
+/表情署名          看作者与许可
 ```
 
-装完第一条回复会慢一点（后台在下清单和建向量），之后就正常了。
+首条回复如果向量库还没建好，会自动先用关键词选图（`selector=自动` 时），不会卡住。
 
 ## 两个能力
 
@@ -53,18 +59,18 @@ pip install fonttools brotli
 
 每条回复之后，按语境挑一张大肥鱼补在后面。
 
-- 讲正事、答技术问题时挑中性不抢戏的图；对方在说沉重的事就不发
 - 正文先发出去，表情随后补一条，不拖慢回复
 - 模型自己发过图就自动让位，不会一条回复两张图
 - 有最小间隔、防重复窗口、情绪排除、会话黑名单
+- 双人表情（大肥鱼和GPT娘）按 `dual_weight` 降权，默认 0.85
 
-选图有两种方式：
+选图三种方式（面板里是中文下拉）：
 
-| selector | 做什么 | 花多少 |
+| 选项 | 做什么 | 花多少 |
 | --- | --- | --- |
-| `semantic`（默认） | 向量召回 10 张 → 对话模型挑一张或说不合适 | 每条回复几百 token |
-| `keyword` | 本地关键词打分，随机取 | 零 token |
-| `auto` | 向量没建好时退关键词 | 视情况 |
+| `自动`（默认） | 向量库就绪就用向量；没就绪先用关键词，不卡首条回复 | 视情况 |
+| `向量选图` | 向量召回 10 张 → 对话模型挑一张 | 每条回复几百 token |
+| `关键词选图` | 本地关键词打分，随机取 | 零 token |
 
 ### 2. 贴字表情
 
@@ -81,8 +87,8 @@ pip install fonttools brotli
 模板：`想`(think) / `举牌`(sign) / `葱卷`(scroll) / `上联`(couplet_top) /
 `下联`(couplet_bottom) / `抱`(hug)。
 
-纯 Python 渲染（Pillow + numpy + fontTools），**不需要 Node**，
-Windows / Linux / macOS 行为一致。字体按 unicode-range 只下命中的那几个分片。
+纯 Python 渲染（Pillow + numpy + fontTools），**不需要 Node**，Windows / Linux / macOS 行为一致。
+字体按 unicode-range 只下命中的那几个分片，缓存后离线也能继续用。
 
 ## 四个 LLM 工具
 
@@ -104,8 +110,8 @@ Windows / Linux / macOS 行为一致。字体按 unicode-range 只下命中的�
 
 | 键 | 可选项 | 说明 |
 | --- | --- | --- |
-| `selector` 选图方式 | `semantic` / `keyword` / `auto` | 默认 semantic：向量召回 + 模型精选 |
-| `mode` 发送时机 | `after_send` / `inline` | 默认 after_send：正文先发，表情补一条 |
+| `selector` 选图方式 | `自动` / `向量选图` / `关键词选图` | 默认自动：有向量用向量，没有先用关键词 |
+| `mode` 发送时机 | `正文后补一张` / `图文一起发` | 默认正文后补一张：正文先发，表情补一条 |
 | `embedding_provider_id` 向量模型 | `auto` / 你机器上的真实 ID | 默认 auto：自动用第一个可用的向量模型 |
 | `rerank_provider_id` 精选模型 | 你已配置的对话模型 | 下拉列表由 AstrBot 动态填入 |
 
@@ -114,19 +120,40 @@ Windows / Linux / macOS 行为一致。字体按 unicode-range 只下命中的�
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled_packs` | `["大肥鱼"]` | 想用双人包就加 `"大肥鱼和GPT娘"` |
-| `data_dir` | 空 | 留空自动选；老版本已下到 `/tmp/.astrbot/nekowhale-stickers` 的会继续用老目录，不重下 |
-| `prefetch_count` | 6 | 首装预热几张 |
+| `dual_weight` | 0.85 | 双人表情权重：1.0 = 不降权，0.5 = 明显少，0.05 = 基本不出现 |
+| `max_size_mb` | 3.0 | 超过这个体积（MB）的图不进候选池 |
+| `data_dir` | 空 | 留空自动选；老版本下到 `/tmp/.astrbot/nekowhale-stickers` 的会继续用老目录，不重下 |
 | `meme_enabled` | true | 贴字表情总开关 |
-| `meme_watermark` | false | 贴字表情左下角加「用户生成」 |
-| `max_bytes` | 3000000 | 超过这个体积的图不进候选池 |
-| `min_sim` | 0.4 | 相似度低于这个值直接不发 |
+| `min_sim` | 0.4 | 相似度低于这个值的候选会被标注出来（仍然继续往下走） |
+| `download_concurrency` | 3 | 同时下载几个；网络差可以调成 1 |
 
-完整 30 项见插件面板。
+完整 28 项见插件面板。
+
+## 兼容性
+
+| 项目 | 支持情况 |
+| --- | --- |
+| Python | 3.10 及以上（跟随 AstrBot） |
+| Windows 10/11 | ✅ 实测通过（含中文用户名、中文路径、输出文件被占用的情况） |
+| Linux | ✅ 生产环境长期运行 |
+| macOS | ✅ 未实测，代码无平台分支，字体回退到 Songti/PingFang |
+| Node.js | ❌ 不需要 |
+| 额外服务 | ❌ 不需要（素材走官方 CDN，国内直连即可） |
+
+Windows 上专门处理过的坑：
+
+- **文件占用**：Windows 下 `os.replace` 只要目标文件被别人打开着就会失败，
+  所以所有写盘都走「临时文件 → 退避重试改名」，贴字表情实在换不动就换个文件名发出去，
+  不会让这条回复失败。
+- **字体**：优先用官方 woff2 分片（需要 fontTools + brotli），缺了就退回系统楷体/雅黑。
+- **日志编码**：日志文案保持 cp936 可编码，重定向到文件不会炸。
 
 ## 依赖
 
-`httpx`（AstrBot 自带）。贴字表情额外需要 `Pillow` 与 `numpy`（AstrBot 自带）、
-`fontTools`（缺了会退化成系统字体，画出来仍然能看）。
+全部走标准库 `urllib`，没有额外 HTTP 依赖。贴字表情需要：
+
+- `Pillow`、`numpy` —— AstrBot 自带
+- `fontTools`（可选）—— 解码 woff2 字体分片，缺了退回系统字体
 
 ## 许可
 
@@ -137,3 +164,27 @@ Windows / Linux / macOS 行为一致。字体按 unicode-range 只下命中的�
   仅用于标识本插件，版权归作者，不作商业用途
 
 本插件不镜像、不打包、不再分发任何表情素材。
+
+## 更新日志
+
+### 2.3.0
+
+- 选图方式默认改为「自动」：向量没好时不再等，直接用关键词
+- 加插件封面 `logo.png`
+- Windows 兼容性加固：`os.replace` 占用重试、GIF 显式指定格式、写盘移出事件循环
+- README 补齐兼容性说明与更新日志
+
+### 2.2.1
+
+- 去掉「讲正事挑中性图 / 只对沉重话题不配图」的特殊规则，改为正常配图
+- 去掉启动预热（`prefetch_on_start` / `prefetch_count`）
+- 去掉贴字表情的水印（`meme_watermark`）
+- 体积上限改用 MB（`max_size_mb`）
+- 双人表情降权改为可调系数（`dual_weight`）
+- 选图方式、发送时机改为中文下拉
+
+### 2.2.0
+
+- 重写为运行时按需下载，插件体积从 388 MB 降到 ~50 KB
+- 纯 Python 复刻贴字表情渲染（不再需要 Node）
+- 把上游 MCP 的四个工具做成插件自带的 LLM 工具

@@ -34,6 +34,8 @@ import io
 import json
 import os
 import re
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -123,10 +125,9 @@ def balanced_lines(text: str, w: float, h: float) -> list[str]:
 class MemeRenderer:
     """一个插件实例一份；内部缓存字体、模板元数据、解码过的底图。"""
 
-    def __init__(self, fetcher: Any, cache_dir: str | Path, watermark: bool = False) -> None:
+    def __init__(self, fetcher: Any, cache_dir: str | Path) -> None:
         self.fetcher = fetcher
         self.cache_dir = Path(cache_dir)
-        self.watermark = bool(watermark)
         self._css: dict[str, list[tuple[list[tuple[int, int]], str]]] = {}
         self._ttf: dict[tuple[str, str], bytes] = {}
         self._fonts: dict[tuple[str, str, int], Any] = {}
@@ -388,17 +389,37 @@ class MemeRenderer:
             default = "恭喜发财" if tpl == "couplet_top" else "万事如意"
             w, h, frames, delays = await self._render_couplet(tpl, text or default)
 
-        if self.watermark:
-            stamp_watermark(frames, w, h)
-
         out_dir = self.cache_dir / "renders"
         out_dir.mkdir(parents=True, exist_ok=True)
         key = hashlib.sha1(
-            f"{tpl}\x00{text}\x00{len(frames)}\x00{self.watermark}".encode("utf-8")
+            f"{tpl}\x00{text}\x00{len(frames)}".encode("utf-8")
         ).hexdigest()[:16]
         path = out_dir / f"{key}.gif"
-        await asyncio.to_thread(encode_gif, frames, delays, str(path))
-        return path
+        return await asyncio.to_thread(self._write_gif, frames, delays, path)
+
+    @staticmethod
+    def _write_gif(frames: list[np.ndarray], delays: list[int], path: Path) -> Path:
+        """先写临时文件再原子改名；Windows 上目标被占用时退避重试，最后换名保命。"""
+        tmp = path.with_name(f"{path.stem}.{uuid.uuid4().hex[:8]}.part")
+        try:
+            encode_gif(frames, delays, str(tmp))
+            for i in range(10):
+                try:
+                    os.replace(tmp, path)
+                    return path
+                except PermissionError:
+                    time.sleep(min(0.02 * (2 ** i), 0.5))
+            # 同一个 key 的旧图正被发送流程占着：换个名字写出去，别让这条回复失败
+            alt = path.with_name(f"{path.stem}-{uuid.uuid4().hex[:6]}.gif")
+            os.replace(tmp, alt)
+            logger.debug(f"[nekowhale] 原图被占用，改用 {alt.name}")
+            return alt
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
 
     async def _load_image(self, src: str) -> bytes:
         src = (src or "").strip()
@@ -658,6 +679,7 @@ def encode_gif(frames: list[np.ndarray], delays: list[int], path: str) -> None:
         out.append(q)
     out[0].save(
         path,
+        format="GIF",  # 显式指定：临时文件名是 .part，PIL 靠后缀猜格式会猜错
         save_all=True,
         append_images=out[1:],
         duration=delays,
@@ -679,47 +701,3 @@ def woff2_to_ttf(data: bytes) -> bytes:
     font.save(buf)
     return buf.getvalue()
 
-
-# ------------------------------------------------------------------ 水印
-def stamp_watermark(frames: list[np.ndarray], w: int, h: int) -> None:
-    """右上角淡淡的「用户生成」角标（GIF 只有 1 位透明，只能近似半透明）。"""
-    text = "用户生成"
-    alpha = 0.42
-    grey = 138
-    grey_clear = 176
-    margin = 4
-    if w < 60 or h < 40:
-        return
-    px = max(10, min(14, round(w * 0.036)))
-    font = None
-    for path in FALLBACK_FONTS["NotoBlack"]:
-        try:
-            if Path(path).is_file():
-                font = ImageFont.truetype(path, px)
-                break
-        except Exception:
-            continue
-    if font is None:
-        font = ImageFont.load_default()
-    box_w = int(font.getlength(text)) + 2
-    box_h = int(px * 1.3)
-    canvas = Image.new("L", (box_w, box_h), 0)
-    ImageDraw.Draw(canvas).text((1, box_h / 2), text, font=font, fill=255, anchor="lm")
-    cov = np.array(canvas, dtype=np.float64) / 255.0
-    x0 = max(0, w - box_w - margin)
-    for frame in frames:
-        hh = min(box_h, h - margin)
-        ww = min(box_w, w - x0)
-        if hh <= 0 or ww <= 0:
-            continue
-        region = frame[margin : margin + hh, x0 : x0 + ww]
-        c = cov[:hh, :ww]
-        opaque = region[..., 3] >= 128
-        k = alpha * c
-        for ch in range(3):
-            blended = region[..., ch] * (1 - k) + grey * k
-            region[..., ch] = np.where(opaque, blended, region[..., ch]).astype(np.uint8)
-        dot = (~opaque) & (c >= 0.5)
-        for ch in range(3):
-            region[..., ch] = np.where(dot, grey_clear, region[..., ch]).astype(np.uint8)
-        region[..., 3] = np.where(dot, 255, region[..., 3]).astype(np.uint8)
