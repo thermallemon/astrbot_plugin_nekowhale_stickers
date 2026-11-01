@@ -1,0 +1,24 @@
+本插件仓库里**只有代码，没有任何表情素材**。
+
+代码（*.py、_conf_schema.json、README、本文件说明文字）
+    Apache-2.0，见 LICENSE-Apache-2.0.txt 与 NOTICE。
+
+知识库数据（运行时从 https://kiriyuki.com 拉取，不随插件分发）
+    Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)
+    https://creativecommons.org/licenses/by-nc/4.0/
+    覆盖：表情的情绪、标签、适用场景、画面描述等标注。
+    可以二次分发，但必须保留原作者链接与网址
+    （可以叫我云大人/雾雪，https://space.bilibili.com/103739，https://kiriyuki.com），
+    且不得收费或用于其他商业用途。
+
+不属于本仓库、也不在本仓库任何许可覆盖范围内的内容
+    表情 GIF、立绘、站点图片 —— 运行时从 https://kiriyuki.com 取，版权仍归作者所有。
+    允许保留作者链接与网址的非商业二次分发；禁止付费提供或其他商业用途。
+
+形象来源
+    大肥鱼：基于 ZipZipPipe（https://space.bilibili.com/4168597）
+            与 上善无形（https://space.bilibili.com/4456176）
+    GPT娘：基于 ZipZipPipe
+    网页桌宠：由 kiriyuki.com 提供
+
+本插件不分发、不镜像、不打包上述任何素材。如果你要 fork 并内置素材，请先取得作者授权。

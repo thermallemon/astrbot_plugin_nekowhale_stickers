@@ -1,0 +1,200 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用自动配图",
+    "hint": "关闭后不再自动补图，模型自己调用表情工具的行为不受影响。",
+    "default": true
+  },
+  "selector": {
+    "type": "string",
+    "description": "选图方式",
+    "hint": "semantic：向量召回 + 模型精选（推荐，挑不出就跳过）；keyword：旧的关键词打分（几乎等于随机，只在向量没建好时兜底）；auto：能用向量就用向量，向量没建好时退关键词。",
+    "default": "semantic"
+  },
+  "mode": {
+    "type": "string",
+    "description": "发送时机",
+    "hint": "after_send：正文先发出去，再单独补一条表情（推荐，不拖慢回复）；inline：表情拼进消息链，和正文一起发，但选图耗时会让回复晚半秒到一秒。",
+    "default": "after_send"
+  },
+  "probability": {
+    "type": "float",
+    "description": "命中概率",
+    "hint": "0~1。1 表示每条回复都尝试配图（挑不到合适的仍然不发）；0.5 表示一半的回复。默认 1。",
+    "default": 1.0
+  },
+  "drop_dup_reply": {
+    "type": "bool",
+    "description": "去掉重复的正文",
+    "hint": "模型已经用 send_message_to_user 把同一句话发出去（常见于出图后顺带说一句）时，不再把这句话当正文重复发一遍，避免群里出现「一条回复 + 一条引用」。默认开。",
+    "default": true
+  },
+  "enabled_packs": {
+    "type": "list",
+    "description": "启用的表情包",
+    "hint": "可填「大肥鱼」和「大肥鱼和GPT娘」。默认只用大肥鱼；双人包（大肥鱼和GPT娘）带方向标注，单人群聊里容易突兀，想做双人互动再打开。填错或留空都按只开大肥鱼处理。",
+    "items": {
+      "type": "string"
+    },
+    "default": ["大肥鱼"]
+  },
+  "embedding_provider_id": {
+    "type": "string",
+    "description": "向量模型",
+    "hint": "填 AstrBot 里已配置的 embedding provider ID，例如 siliconflow/bge-m3。留空则只能用关键词模式。",
+    "default": "siliconflow/bge-m3"
+  },
+  "rerank_provider_id": {
+    "type": "string",
+    "description": "精选模型",
+    "hint": "填 AstrBot 里已配置的对话模型 ID，例如 deepseek/deepseek-flash。用它从召回候选里挑一张，或者明确说不合适。费用约每条回复几百 token。",
+    "default": "deepseek/deepseek-flash"
+  },
+  "llm_rerank": {
+    "type": "bool",
+    "description": "启用模型精选",
+    "hint": "关掉后只用向量 top1（便宜但错得更多）。",
+    "default": true
+  },
+  "recall_k": {
+    "type": "int",
+    "description": "候选数量",
+    "hint": "向量召回多少张交给精选模型。默认 10：太多会让模型分心，太少容易漏掉贴切的那张。",
+    "default": 10
+  },
+  "min_sim": {
+    "type": "float",
+    "description": "相似度下限",
+    "hint": "召回最高相似度低于这个值就直接不发，连模型都不问。实测正常对话在 0.53~0.68，默认 0.40。",
+    "default": 0.4
+  },
+  "rerank_timeout": {
+    "type": "float",
+    "description": "精选超时（秒）",
+    "hint": "超过这个时间没判断完就放弃本次配图。实测一次判断 0.9~1.5 秒，默认 6。",
+    "default": 6.0
+  },
+  "fallback_to_keyword": {
+    "type": "bool",
+    "description": "向量没建好时用关键词兜底",
+    "hint": "首次启动要十几秒建向量，这期间可以用旧的关键词法凑合。",
+    "default": true
+  },
+  "site": {
+    "type": "string",
+    "description": "素材站地址",
+    "hint": "清单、标注、表情图都从这个站按需下载。默认 https://kiriyuki.com，一般不用改。",
+    "default": "https://kiriyuki.com"
+  },
+  "data_dir": {
+    "type": "string",
+    "description": "素材缓存目录",
+    "hint": "留空自动选择：优先插件数据目录（data/plugin_data/astrbot_plugin_nekowhale_stickers/nekowhale-stickers），如果老版本已经把素材下到 /tmp/.astrbot/nekowhale-stickers 就继续用老目录，不会重下。",
+    "default": ""
+  },
+  "cache_dir": {
+    "type": "string",
+    "description": "向量缓存目录",
+    "hint": "留空使用插件数据目录。",
+    "default": ""
+  },
+  "meta_path": {
+    "type": "string",
+    "description": "标注文件路径",
+    "hint": "留空则从官方站拉取并缓存（推荐）。填了但文件不存在会退化成只用文件名匹配。",
+    "default": ""
+  },
+  "prefetch_on_start": {
+    "type": "bool",
+    "description": "启动时预热几张",
+    "hint": "首次装好之后，趁没人说话先下几张常用的，免得第一条回复要等下载。默认开。",
+    "default": true
+  },
+  "prefetch_count": {
+    "type": "int",
+    "description": "预热张数",
+    "hint": "默认 6。每张约 0.3~0.7MB，6 张大约 3MB。",
+    "default": 6
+  },
+  "download_timeout": {
+    "type": "float",
+    "description": "下载超时（秒）",
+    "hint": "单张表情或清单的下载超时。国内直连一般 0.4 秒左右，默认 40 足够宽松。",
+    "default": 40.0
+  },
+  "download_concurrency": {
+    "type": "int",
+    "description": "下载并发",
+    "hint": "同时下几张。/表情下载 全部 时会用到。对方有 CDN 限流（429/570），默认 3 比较稳。",
+    "default": 3
+  },
+  "meme_enabled": {
+    "type": "bool",
+    "description": "启用贴字表情",
+    "hint": "把一句话贴进表情里生成新 GIF（想/举牌/葱卷/对联/抱）。需要 Pillow 和 numpy，AstrBot 自带。",
+    "default": true
+  },
+  "meme_watermark": {
+    "type": "bool",
+    "description": "贴字表情加水印",
+    "hint": "在生成的图左下角加一行「用户生成」。默认关。",
+    "default": false
+  },
+  "max_bytes": {
+    "type": "int",
+    "description": "单张体积上限（字节）",
+    "hint": "超过这个体积的表情不会进入候选池。默认 3000000（约 2.9MB），可避免发出 5MB 的大图。",
+    "default": 3000000
+  },
+  "top_n": {
+    "type": "int",
+    "description": "关键词模式的候选数量",
+    "hint": "只在 selector=keyword 时有意义：打分后取前 N 张里随机挑一张。默认 6。",
+    "default": 6
+  },
+  "recent_window": {
+    "type": "int",
+    "description": "防重复窗口",
+    "hint": "同一个会话里最近发过的 N 张不再重复出现。默认 12。",
+    "default": 12
+  },
+  "cooldown": {
+    "type": "int",
+    "description": "最小间隔（回复条数）",
+    "hint": "发过一张表情后，同一个会话接下来的 N 条回复不再配图，避免刷屏。默认 1 表示不连着发；填 0 关闭限制。",
+    "default": 1
+  },
+  "penalize_direction": {
+    "type": "bool",
+    "description": "降低双人表情权重",
+    "hint": "只影响关键词模式。双人表情带有方向标注，单人群聊里容易突兀，命中时权重乘以 0.85。",
+    "default": true
+  },
+  "exclude_emotions": {
+    "type": "list",
+    "description": "排除的情绪类别",
+    "hint": "例如填 生气、嘲讽、害怕 可让这些类别的表情永不出现。留空表示全部可用。",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "fallback_emotions": {
+    "type": "list",
+    "description": "关键词模式的兜底类别",
+    "hint": "只在 selector=keyword 时使用。留空使用内置默认（其他、开心、搞怪、卖萌、打招呼、赞同、惊讶）。",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  },
+  "skip_umos": {
+    "type": "list",
+    "description": "不自动配图的会话",
+    "hint": "逐项填写 UMO，命中的会话不会自动发表情（模型主动发的不受影响）。可用 /sid 指令获取 UMO。",
+    "items": {
+      "type": "string"
+    },
+    "default": []
+  }
+}

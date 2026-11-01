@@ -1,0 +1,34 @@
+# 大肥鱼表情包 · 署名与许可（NOTICE）
+
+本插件是 [dsh-nekowhale-stickers](https://github.com/Loping151/dsh-nekowhale-stickers)
+在 AstrBot 上的移植/二次开发。按上游 Apache-2.0 的要求，保留本 NOTICE。
+
+## 素材
+
+- 表情作者：**B站 可以叫我云大人** — <https://space.bilibili.com/103739>
+- 制作与发布：**kiriyuki.com** — <https://kiriyuki.com>
+- 大肥鱼形象基于 **ZipZipPipe**（<https://space.bilibili.com/4168597>）与
+  **上善无形**（<https://space.bilibili.com/4456176>）
+- GPT娘形象基于 **ZipZipPipe**
+- 网页桌宠由 kiriyuki.com 提供
+
+表情 GIF、立绘与站点图片的版权归作者所有。
+**允许「保留作者链接与网址」的非商业二次分发；禁止付费提供或其他商业用途。**
+
+## 代码与数据
+
+- 上游代码：Apache-2.0
+- 知识库数据（`meta/`）：CC BY-NC 4.0 —— 可二次分发，须保留原作者链接与网址，
+  禁止付费提供或用于其他商业用途
+- 本插件：Apache-2.0。二次修改或重新发布同类功能时，必须保留：
+  1. 上游仓库地址 <https://github.com/Loping151/dsh-nekowhale-stickers>
+  2. 表情作者链接 <https://space.bilibili.com/103739> 与 <https://kiriyuki.com>
+  3. 上述形象来源说明
+
+## 本插件的分发策略
+
+插件仓库/安装包里**不含任何表情文件**，只有代码。
+清单、标注与 GIF 全部在运行时从 <https://kiriyuki.com> 按需拉取并缓存在本地，
+不做镜像站、不做打包分发。
+
+如果你要 fork 本插件并改为内置素材，请先自行取得作者授权。

@@ -1,0 +1,42 @@
+name: astrbot_plugin_nekowhale_stickers
+display_name: 大肥鱼表情包
+short_desc: 会自己配图还会给你画表情——322 张大肥鱼按需下载，能把一句话贴进表情里
+desc: |-
+  大肥鱼表情包：自动配图 + 贴字表情 + 四个给模型用的表情工具。
+
+  · 表情库 322 张（大肥鱼 286 + 大肥鱼和GPT娘 36），带情绪/标签/用法/画面标注
+  · 插件本身只含代码，不含任何表情文件：清单、标注、GIF 全部在运行时按需从官方站拉取，
+    用到哪张下哪张（单张 0.3~0.7MB），也可以一次下全套
+  · 语义选图：用 embedding provider 给「适用场景」建向量做召回，再让对话模型从候选里挑一张；
+    讲正事、答技术问题时挑中性不抢戏的图，只有对方在说沉重的事才不发
+  · 正文先发出去，表情随后补一条，选图的 1 秒延迟不会拖慢回复
+  · 模型自己发过图时自动让位，不会重复发两张
+  · 贴字表情：把一句话贴进表情里生成新 GIF（想 / 举牌 / 葱卷 / 对联 / 抱），
+    纯 Python 渲染，不需要 Node，Windows / Linux / macOS 都能跑
+  · 四个 LLM 工具：nekowhale_sticker_search / nekowhale_sticker_send /
+    nekowhale_sticker_info / nekowhale_meme_render（等价于上游 MCP 的四个工具，
+    但不需要装 Node）
+  · 支持最小间隔、防重复窗口、排除情绪类别、跳过指定会话、限制单张体积
+  · 可退化为纯本地关键词打分（不调用任何模型，零 token）
+
+  署名：表情作者 B站 可以叫我云大人（https://space.bilibili.com/103739），
+  素材站 https://kiriyuki.com；代码框架来自
+  https://github.com/Loping151/dsh-nekowhale-stickers（Apache-2.0）；
+  大肥鱼形象基于 ZipZipPipe 与 上善无形，GPT娘形象基于 ZipZipPipe。
+  表情素材仅运行时拉取、不做镜像、不做二次分发。
+version: 2.2.0
+author: in1t1a1
+repo: https://gitee.com/in1t1a1/astrbot_plugin_nekowhale_stickers
+astrbot_version: ">=4.11.0"
+support_platforms:
+  - aiocqhttp
+  - telegram
+  - qq_official
+  - lark
+  - dingtalk
+tags:
+  - 表情包
+  - sticker
+  - 大肥鱼
+  - meme
+  - 贴字表情
