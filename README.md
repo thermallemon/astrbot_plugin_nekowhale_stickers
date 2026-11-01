@@ -133,5 +133,7 @@ Windows / Linux / macOS 行为一致。字体按 unicode-range 只下命中的�
 - 插件代码：Apache-2.0，上游 [dsh-nekowhale-stickers](https://github.com/Loping151/dsh-nekowhale-stickers)
 - 标注数据：CC BY-NC 4.0
 - 表情 GIF：版权归作者，允许保留署名的非商业分享
+- 插件封面 `logo.png`：作者官方立绘（<https://kiriyuki.com/meme/kit/nekowhale/id-photo-blue.png>），
+  仅用于标识本插件，版权归作者，不作商业用途
 
 本插件不镜像、不打包、不再分发任何表情素材。
