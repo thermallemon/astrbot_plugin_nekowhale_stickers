@@ -9,6 +9,29 @@
 > kiriyuki.com 制作。形象基于 ZipZipPipe 与 上善无形。
 > 完整许可见 [NOTICE](NOTICE) 与 [LICENSE-ASSETS](LICENSE-ASSETS)。
 
+## 安装
+
+**方式一（推荐）**：AstrBot 面板 → 插件 → 从链接安装，填
+
+```text
+https://gitee.com/in1t1a1/astrbot_plugin_nekowhale_stickers
+```
+
+面板会自动校验并拉取，装完自动重载。
+
+**方式二**：下载仓库 zip → 面板「上传安装」→ 选 zip。
+
+要求：AstrBot **>= 4.11.0**。**不需要 Node**，贴字表情是纯 Python 渲染。
+
+可选依赖（想让贴字表情和官方效果逐像素一致时装上）：
+
+```bash
+pip install fonttools brotli
+```
+
+不装也能用 —— 字体分片需要 fontTools 解码 woff2，缺了会自动退回系统字体
+（Windows 用楷体/雅黑，Linux 用 Noto CJK），排版一致，只是字形略不同。
+
 ## 装好之后
 
 ```text
