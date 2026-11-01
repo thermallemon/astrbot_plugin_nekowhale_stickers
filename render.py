@@ -262,12 +262,14 @@ class MemeRenderer:
     async def fit_font(
         self, lines: list[str], w: float, h: float, family: str, max_px: int, min_px: int
     ) -> int:
+        # 留边：字形墨迹会超出 advance，贴边就会切字（2026-11-01 修）
+        limit = w * 0.92
         for px in range(int(max_px), min_px - 1, -1):
-            if len(lines) * metrics(family, px)[2] > h:
+            if len(lines) * metrics(family, px)[2] > h * 0.98:
                 continue
             ok = True
             for line in lines:
-                if await self.text_width(family, line, px) > w:
+                if await self.text_width(family, line, px) > limit:
                     ok = False
                     break
             if ok:
