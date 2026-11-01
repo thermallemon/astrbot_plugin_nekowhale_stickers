@@ -132,10 +132,10 @@ class NekoWhaleStickers(Star):
         self._recent: dict[str, deque[str]] = defaultdict(
             lambda: deque(maxlen=int(self._cfg("recent_window", 12) or 12))
         )
-        # 最小间隔改成「真实秒数」：老版本是「回复条数」倒数，cooldown=1 等于
-        # 每两条回复必跳过一条，看起来就像「有时候不配图」。
-        self._last_sent_at: dict[str, float] = {}
-        self._cooldown_remain = 0.0
+        # 最小间隔按「回复条数」倒数：发过一张后，同一会话接下来 N 条回复不配图。
+        # 默认 0 = 每条都配。老版本默认 1，等于每两条回复必跳过一条。
+        self._cooldown: dict[str, int] = defaultdict(int)
+        self._cooldown_remain = 0
         self._skip_reason = "无"
         self._build_attempted = False
 
@@ -458,26 +458,24 @@ class NekoWhaleStickers(Star):
             return False
         return random.random() <= probability
 
-    def _cooldown_seconds(self) -> float:
-        """最小间隔（秒）。<=0 表示不限制。"""
+    def _cooldown_count(self) -> int:
+        """最小间隔（回复条数）。<=0 表示不限制。"""
         try:
-            value = float(self._cfg("cooldown", 0) or 0)
+            value = int(self._cfg("cooldown", 0) or 0)
         except (TypeError, ValueError):
-            value = 0.0
-        return max(0.0, value)
+            value = 0
+        return max(0, value)
 
     def _cooldown_blocked(self, umo: str) -> bool:
-        gap = self._cooldown_seconds()
-        self._cooldown_remain = 0.0
-        if gap <= 0:
+        count = self._cooldown_count()
+        self._cooldown_remain = 0
+        if count <= 0:
             return False
-        last = self._last_sent_at.get(umo, 0.0)
-        if last <= 0:
-            return False
-        remain = gap - (time.time() - last)
+        remain = self._cooldown.get(umo, 0)
         if remain <= 0:
             return False
-        self._cooldown_remain = remain
+        self._cooldown[umo] = remain - 1
+        self._cooldown_remain = remain - 1
         return True
 
     async def _choose(
@@ -651,7 +649,7 @@ class NekoWhaleStickers(Star):
             return
         umo = event.unified_msg_origin
         if self._cooldown_blocked(umo):
-            logger.info(f"[nekowhale] {umo} 跳过（最小间隔，还剩 {self._cooldown_remain:.1f}s）")
+            logger.info(f"[nekowhale] {umo} 跳过（最小间隔，还剩 {self._cooldown_remain} 条回复不配图）")
             return
         result = event.get_result()
         if result is None:
@@ -667,7 +665,7 @@ class NekoWhaleStickers(Star):
             return
         result.chain.append(Image.fromFileSystem(str(path)))
         self._recent[umo].append(str(item["id"]))
-        self._last_sent_at[umo] = time.time()
+        self._cooldown[umo] = self._cooldown_count()
         event.set_extra(EXTRA_PICKED, True)
         self._log_pick(umo, item, info)
 
@@ -698,7 +696,7 @@ class NekoWhaleStickers(Star):
             return
         umo = event.unified_msg_origin
         if self._cooldown_blocked(umo):
-            logger.info(f"[nekowhale] {umo} 跳过（最小间隔，还剩 {self._cooldown_remain:.1f}s）")
+            logger.info(f"[nekowhale] {umo} 跳过（最小间隔，还剩 {self._cooldown_remain} 条回复不配图）")
             return
         started = time.time()
         item, info = await self._choose(umo, ctx["user_text"], ctx["reply_text"])
@@ -711,7 +709,7 @@ class NekoWhaleStickers(Star):
         if not await self._deliver(event, item):
             return
         self._recent[umo].append(str(item["id"]))
-        self._last_sent_at[umo] = time.time()
+        self._cooldown[umo] = self._cooldown_count()
         event.set_extra(EXTRA_PICKED, True)
         self._log_pick(umo, item, info)
 
