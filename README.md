@@ -100,6 +100,17 @@ Windows / Linux / macOS 行为一致。字体按 unicode-range 只下命中的�
 
 ## 配置要点
 
+面板里直接点选的四项：
+
+| 键 | 可选项 | 说明 |
+| --- | --- | --- |
+| `selector` 选图方式 | `semantic` / `keyword` / `auto` | 默认 semantic：向量召回 + 模型精选 |
+| `mode` 发送时机 | `after_send` / `inline` | 默认 after_send：正文先发，表情补一条 |
+| `embedding_provider_id` 向量模型 | `auto` / 你机器上的真实 ID | 默认 auto：自动用第一个可用的向量模型 |
+| `rerank_provider_id` 精选模型 | 你已配置的对话模型 | 下拉列表由 AstrBot 动态填入 |
+
+其余常用项：
+
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled_packs` | `["大肥鱼"]` | 想用双人包就加 `"大肥鱼和GPT娘"` |
