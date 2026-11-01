@@ -41,7 +41,7 @@ from .semantic import DEFAULT_MIN_SIM, DEFAULT_RECALL_K, SemanticPicker
 from .sticker_index import StickerIndex, norm_packs
 
 PLUGIN_NAME = "astrbot_plugin_nekowhale_stickers"
-PLUGIN_VERSION = "2.2.0"
+PLUGIN_VERSION = "2.2.1"
 SITE = "https://kiriyuki.com"
 
 # 模型自己把表情发出去时会用到的工具名（含 MCP 那边的名字，避免重复发）

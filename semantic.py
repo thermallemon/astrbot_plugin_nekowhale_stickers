@@ -36,6 +36,36 @@ except ImportError:  # 独立跑（不带 AstrBot）时退化到标准 logging
 
     logger = logging.getLogger("nekowhale")
 
+
+def _provider_type_of(inst: Any) -> str:
+    """取 provider 实例的能力类型，统一成字符串。
+
+    AstrBot 4.x 的 ``ProviderMeta.provider_type`` 是 ``enum.Enum``（不是 str 枚举），
+    直接和字符串比较永远为 False，所以这里要取 ``.value``；
+    meta() 抛错时退回 provider_config["type"]（如 ``openai_embedding``）做子串判断。
+    """
+    try:
+        ptype = getattr(inst.meta(), "provider_type", "")
+    except Exception:
+        ptype = ""
+    ptype = getattr(ptype, "value", ptype)
+    if isinstance(ptype, str) and ptype:
+        return ptype
+    try:
+        raw = getattr(inst, "provider_config", {}).get("type", "") or ""
+    except Exception:
+        raw = ""
+    raw = str(raw)
+    if "embedding" in raw:
+        return "embedding"
+    if "rerank" in raw:
+        return "rerank"
+    if "speech_to_text" in raw:
+        return "speech_to_text"
+    if "text_to_speech" in raw:
+        return "text_to_speech"
+    return raw
+
 CACHE_VERSION = 1
 EMB_BATCH_SIZE = 32
 DEFAULT_RECALL_K = 10
@@ -196,6 +226,12 @@ class SemanticPicker:
         return self._embed_provider() is not None
 
     def _embed_provider(self) -> Any:
+        if self._is_auto(self.embedding_provider_id):
+            self._resolve_auto_embedding()
+            # 没解析出真实 id 就直接返回，免得下面把 auto 当成 provider id 去查
+            # 从而把「没找到向量模型」的提示覆盖成「找不到 embedding provider：auto」
+            if self._is_auto(self.embedding_provider_id):
+                return None
         if not self.embedding_provider_id:
             return None
         prov = self.context.get_provider_by_id(self.embedding_provider_id)
@@ -206,6 +242,40 @@ class SemanticPicker:
             self.last_error = f"{self.embedding_provider_id} 不是 embedding provider"
             return None
         return prov
+
+    @staticmethod
+    def _is_auto(value: str) -> bool:
+        return (value or "").strip().lower() in {"", "auto", "自动", "default"}
+
+    def _auto_embedding_ids(self) -> list[str]:
+        """按 provider_manager 的实例表挑出所有 embedding 类型的 provider id。"""
+        pm = getattr(self.context, "provider_manager", None)
+        inst_map = getattr(pm, "inst_map", None)
+        if not isinstance(inst_map, dict):
+            return []
+        found: list[str] = []
+        for pid, inst in inst_map.items():
+            if _provider_type_of(inst) == "embedding":
+                found.append(pid)
+        return found
+
+    def _resolve_auto_embedding(self) -> None:
+        """把 auto 解析成真实 id；解析成功后写回，日志与 stats 都能看到到底用了哪个。"""
+        if self.embedding_provider_id and not self._is_auto(self.embedding_provider_id):
+            return
+        ids = self._auto_embedding_ids()
+        if not ids:
+            self.last_error = (
+                "向量模型设为「自动」但没找到可用的 embedding provider，"
+                "请先在 AstrBot 里添加一个向量模型，或在本项手动选一个"
+            )
+            return
+        pid = ids[0]
+        if pid != self.embedding_provider_id:
+            self.embedding_provider_id = pid
+            logger.info(f"[nekowhale] 向量模型自动选中：{pid}")
+        self.last_error = ""
+
 
     def _chat_provider(self) -> Any:
         if not self.llm_enabled or not self.rerank_provider_id:

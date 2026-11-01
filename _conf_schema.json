@@ -9,12 +9,21 @@
     "type": "string",
     "description": "选图方式",
     "hint": "semantic：向量召回 + 模型精选（推荐，挑不出就跳过）；keyword：旧的关键词打分（几乎等于随机，只在向量没建好时兜底）；auto：能用向量就用向量，向量没建好时退关键词。",
+    "options": [
+      "semantic",
+      "keyword",
+      "auto"
+    ],
     "default": "semantic"
   },
   "mode": {
     "type": "string",
     "description": "发送时机",
     "hint": "after_send：正文先发出去，再单独补一条表情（推荐，不拖慢回复）；inline：表情拼进消息链，和正文一起发，但选图耗时会让回复晚半秒到一秒。",
+    "options": [
+      "after_send",
+      "inline"
+    ],
     "default": "after_send"
   },
   "probability": {
@@ -41,13 +50,18 @@
   "embedding_provider_id": {
     "type": "string",
     "description": "向量模型",
-    "hint": "填 AstrBot 里已配置的 embedding provider ID，例如 siliconflow/bge-m3。留空则只能用关键词模式。",
-    "default": "siliconflow/bge-m3"
+    "hint": "auto：自动用你 AstrBot 里第一个可用的向量模型（推荐，换机器不用改）；也可以在上面固定某个 ID，例如 siliconflow/bge-m3。列表里没有你的模型就选 auto。留空等同 auto。",
+    "options": [
+      "auto",
+      "siliconflow/bge-m3"
+    ],
+    "default": "auto"
   },
   "rerank_provider_id": {
     "type": "string",
     "description": "精选模型",
-    "hint": "填 AstrBot 里已配置的对话模型 ID，例如 deepseek/deepseek-flash。用它从召回候选里挑一张，或者明确说不合适。费用约每条回复几百 token。",
+    "hint": "从你已配置的对话模型里选一个，用它从召回候选里挑一张，或者明确说不合适。费用约每条回复几百 token。留空则只用向量 top1。",
+    "_special": "select_provider",
     "default": "deepseek/deepseek-flash"
   },
   "llm_rerank": {
