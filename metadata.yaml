@@ -27,7 +27,7 @@ desc: |-
   表情素材仅运行时拉取、不做镜像、不做二次分发。
 version: 2.3.3
 author: in1t1a1
-repo: https://gitee.com/in1t1a1/astrbot_plugin_nekowhale_stickers
+repo: https://github.com/thermallemon/astrbot_plugin_nekowhale_stickers
 astrbot_version: ">=4.11.0"
 support_platforms:
   - aiocqhttp

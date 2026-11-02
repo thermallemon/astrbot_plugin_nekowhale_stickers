@@ -20,14 +20,12 @@
 **方式一（推荐）**：AstrBot 面板 → 插件 → **「通过 Git 克隆安装」**，填
 
 ```text
-https://gitee.com/in1t1a1/astrbot_plugin_nekowhale_stickers
+https://github.com/thermallemon/astrbot_plugin_nekowhale_stickers
 ```
 
-> 注意别用「从链接安装」：那个入口是给 GitHub 归档地址用的，会用 httpx 直接下载 zip；
-> Gitee 对这类请求有反爬（返回的是 47 KB 的 JS 挑战页），会报「插件压缩包格式错误」。
-> 顶部那个「Git 克隆」入口走 `git` 命令，Gitee 完全支持。
+> 「从链接安装」入口走 httpx 直接下 zip，要填归档地址（见方式二），别填仓库主页。
 
-**方式二**：下载仓库 zip（`https://gitee.com/in1t1a1/astrbot_plugin_nekowhale_stickers/repository/archive/main.zip`）
+**方式二**：下载仓库 zip（`https://github.com/thermallemon/astrbot_plugin_nekowhale_stickers/archive/refs/heads/main.zip`）
 → 面板「上传安装」→ 选 zip。
 
 要求：AstrBot **>= 4.11.0**。**不需要 Node**，贴字表情是纯 Python 渲染。
