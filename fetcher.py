@@ -40,7 +40,7 @@ except ImportError:  # 独立跑（不带 AstrBot）时退化到标准 logging
 
     logger = logging.getLogger("nekowhale")
 
-PLUGIN_VERSION = "2.3.2"
+PLUGIN_VERSION = "2.3.3"
 USER_AGENT = f"astrbot-plugin-nekowhale-stickers/{PLUGIN_VERSION} (+https://kiriyuki.com)"
 
 KIT_MANIFEST = "/api/kit/nekowhale"
@@ -363,19 +363,23 @@ class KitFetcher:
     async def blob(self, url: str, max_bytes: int = 12_000_000) -> bytes:
         """取任意官方资源（meme 模板、字体分片），按 URL 缓存。"""
         path = self._asset_cache(self._url(url))
-        if path.is_file():
+
+        def cached() -> bytes | None:
+            # 空文件（上次写盘中途失败）或超过本次上限的旧缓存都不能当命中，
+            # 否则会静默返回空内容 / 绕过 max_bytes。
             try:
                 data = path.read_bytes()
-                if data:
-                    return data
             except OSError:
-                pass
+                return None
+            return data if data and len(data) <= max_bytes else None
+
+        data = cached()
+        if data is not None:
+            return data
         async with self._lock(f"blob:{path.name}"):
-            if path.is_file():
-                try:
-                    return path.read_bytes()
-                except OSError:
-                    pass
+            data = cached()
+            if data is not None:
+                return data
             status, body, _ = await self._get(self._url(url))
             if len(body) > max_bytes:
                 raise FetchError(f"资源过大（{_human(len(body))}）：{url}")
