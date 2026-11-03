@@ -105,7 +105,7 @@
   "data_dir": {
     "type": "string",
     "description": "素材缓存目录",
-    "hint": "留空自动选择：优先插件数据目录（data/plugin_data/astrbot_plugin_nekowhale_stickers/nekowhale-stickers），如果老版本已经把素材下到 /tmp/.astrbot/nekowhale-stickers 就继续用老目录，不会重下。",
+    "hint": "留空自动选择插件数据目录（data/plugin_data/astrbot_plugin_nekowhale_stickers/nekowhale-stickers）。老版本下到 /tmp/.astrbot/nekowhale-stickers 的素材会在首次加载时自动迁移过来；迁移失败会继续用老目录，不会丢素材。",
     "default": ""
   },
   "cache_dir": {

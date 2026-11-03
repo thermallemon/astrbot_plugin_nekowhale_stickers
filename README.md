@@ -85,6 +85,9 @@ pip install fonttools brotli
 模板：`想`(think) / `举牌`(sign) / `葱卷`(scroll) / `上联`(couplet_top) /
 `下联`(couplet_bottom) / `抱`(hug)。
 
+`抱` 的头像只从 QQ 头像 CDN（`qlogo.cn`）或素材站域名（`site`）取；
+模型传其他 http(s) 地址会被明确拒绝，本地文件路径照旧可用。
+
 纯 Python 渲染（Pillow + numpy + fontTools），**不需要 Node**，Windows / Linux / macOS 行为一致。
 字体按 unicode-range 只下命中的那几个分片，缓存后离线也能继续用。
 
@@ -120,7 +123,7 @@ pip install fonttools brotli
 | `enabled_packs` | `["大肥鱼"]` | 想用双人包就加 `"大肥鱼和GPT娘"` |
 | `dual_weight` | 0.85 | 双人表情权重：1.0 = 不降权，0.5 = 明显少，0.05 = 基本不出现 |
 | `max_size_mb` | 3.0 | 超过这个体积（MB）的图不进候选池 |
-| `data_dir` | 空 | 留空自动选；老版本下到 `/tmp/.astrbot/nekowhale-stickers` 的会继续用老目录，不重下 |
+| `data_dir` | 空 | 留空用插件数据目录；老版本下到 `/tmp/.astrbot/nekowhale-stickers` 的素材首次加载自动迁移，失败则继续用老目录 |
 | `meme_enabled` | true | 贴字表情总开关 |
 | `min_sim` | 0.4 | 相似度低于这个值的候选会被标注出来（仍然继续往下走） |
 | `download_concurrency` | 3 | 同时下载几个；网络差可以调成 1 |

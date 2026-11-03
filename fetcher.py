@@ -33,12 +33,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-try:
-    from astrbot.api import logger
-except ImportError:  # 独立跑（不带 AstrBot）时退化到标准 logging
-    import logging
-
-    logger = logging.getLogger("nekowhale")
+from astrbot.api import logger
 
 PLUGIN_VERSION = "2.3.3"
 USER_AGENT = f"astrbot-plugin-nekowhale-stickers/{PLUGIN_VERSION} (+https://kiriyuki.com)"

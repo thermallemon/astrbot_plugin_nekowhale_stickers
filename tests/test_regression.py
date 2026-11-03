@@ -7,10 +7,16 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
+import json
+import logging
 import os
 import random
+import shutil
+import sys
+import time
 from collections import defaultdict
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +25,29 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN_SOURCE = (ROOT / "main.py").read_text(encoding="utf-8")
+
+
+def _ensure_astrbot_logger_stub() -> None:
+    """fetcher / render / semantic 只从 astrbot.api 取 logger。
+
+    本机（以及 CI）没装 AstrBot 时在这里补一个最小桩，独立脚本想脱离框架
+    加载这些模块也必须先提供同样的 ``astrbot.api.logger``。
+    """
+    try:
+        from astrbot.api import logger  # noqa: F401
+        return
+    except ImportError:
+        pass
+    pkg = types.ModuleType("astrbot")
+    pkg.__path__ = []
+    api = types.ModuleType("astrbot.api")
+    api.logger = logging.getLogger("nekowhale-tests")
+    pkg.api = api
+    sys.modules["astrbot"] = pkg
+    sys.modules["astrbot.api"] = api
+
+
+_ensure_astrbot_logger_stub()
 
 
 class _Logger:
@@ -51,7 +80,7 @@ class _MessageChain(list):
     pass
 
 
-def _extract_main_functions(*wanted):
+def _extract_main_functions(*wanted, overrides=None):
     """Compile only real methods, retaining source line numbers and logic."""
     tree = ast.parse(MAIN_SOURCE, filename=str(ROOT / "main.py"))
     class_node = next(
@@ -75,10 +104,15 @@ def _extract_main_functions(*wanted):
         "logger": LOGGER,
         "Image": _Image,
         "MessageChain": _MessageChain,
+        "Path": Path,
+        "json": json,
+        "shutil": shutil,
         "EXTRA_SENT": "_nekowhale_already_sent",
         "EXTRA_PICKED": "_nekowhale_picked",
         "EXTRA_CTX": "_nekowhale_ctx",
     }
+    if overrides:
+        namespace.update(overrides)
     future = ast.ImportFrom(
         module="__future__", names=[ast.alias(name="annotations")], level=0
     )
@@ -413,6 +447,186 @@ class FetcherCacheRegressionTests(unittest.TestCase):
             self.assertEqual(path.name, "测试.gif")
             self.assertEqual(path.parent.name, "大肥鱼")
             self.assertEqual(path.parent.parent.name, "packs")
+
+
+class DataDirMigrationTests(unittest.TestCase):
+    """审查建议 2：老版 /tmp 素材一次性迁进 plugin_data，失败不丢库。"""
+
+    def _fixture(self, root: Path):
+        plugin_root = root / "plugin_data" / "astrbot_plugin_nekowhale_stickers"
+        plugin_root.mkdir(parents=True, exist_ok=True)
+        temp_root = root / "tmp"
+        temp_root.mkdir(parents=True, exist_ok=True)
+
+        class _StarTools:
+            @staticmethod
+            def get_data_dir(name):
+                return plugin_root
+
+        class _Temp:
+            @staticmethod
+            def gettempdir():
+                return str(temp_root)
+
+        namespace = _extract_main_functions(
+            "_resolve_data_dir",
+            "_migrate_legacy_data_dir",
+            overrides={
+                "StarTools": _StarTools,
+                "tempfile": _Temp,
+                "PLUGIN_NAME": "astrbot_plugin_nekowhale_stickers",
+            },
+        )
+        return (
+            namespace,
+            plugin_root / "nekowhale-stickers",
+            temp_root / ".astrbot" / "nekowhale-stickers",
+        )
+
+    @staticmethod
+    def _subject(namespace):
+        class _Subject:
+            def _cfg(self, key, default=None):
+                return default
+
+            def _migrate_legacy_data_dir(self, legacy, target):
+                return namespace["_migrate_legacy_data_dir"](legacy, target)
+
+        return _Subject()
+
+    def test_fresh_install_uses_plugin_data_dir(self):
+        with tempfile.TemporaryDirectory() as temp:
+            namespace, target, legacy = self._fixture(Path(temp))
+            got = namespace["_resolve_data_dir"](self._subject(namespace))
+            self.assertEqual(got, target)
+            self.assertFalse(legacy.exists())
+
+    def test_existing_plugin_data_wins_without_touching_legacy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            namespace, target, legacy = self._fixture(Path(temp))
+            target.mkdir(parents=True)
+            (target / "manifest.json").write_text("{}", encoding="utf-8")
+            legacy.mkdir(parents=True)
+            (legacy / "manifest.json").write_text("{}", encoding="utf-8")
+            got = namespace["_resolve_data_dir"](self._subject(namespace))
+            self.assertEqual(got, target)
+            self.assertTrue((legacy / "manifest.json").is_file())
+
+    def test_legacy_tmp_dir_is_migrated_then_removed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            namespace, target, legacy = self._fixture(Path(temp))
+            (legacy / "packs").mkdir(parents=True)
+            (legacy / "manifest.json").write_text('{"version": 1}', encoding="utf-8")
+            (legacy / "packs" / "测试.gif").write_bytes(b"GIF89a")
+            got = namespace["_resolve_data_dir"](self._subject(namespace))
+            self.assertEqual(got, target)
+            self.assertEqual((target / "manifest.json").read_text(encoding="utf-8"), '{"version": 1}')
+            self.assertEqual((target / "packs" / "测试.gif").read_bytes(), b"GIF89a")
+            self.assertFalse(legacy.exists())
+            marker = json.loads((target / "migrated-from-tmp.json").read_text(encoding="utf-8"))
+            self.assertEqual(marker["from"], str(legacy))
+            self.assertFalse(target.with_name(target.name + ".migrating").exists())
+
+    def test_migration_failure_keeps_legacy_dir(self):
+        with tempfile.TemporaryDirectory() as temp:
+            namespace, target, legacy = self._fixture(Path(temp))
+            legacy.mkdir(parents=True)
+            (legacy / "manifest.json").write_text("{}", encoding="utf-8")
+            staging = target.with_name(target.name + ".migrating")
+            staging.write_text("占住 staging 路径，让 copytree 失败", encoding="utf-8")
+            got = namespace["_resolve_data_dir"](self._subject(namespace))
+            self.assertEqual(got, legacy)
+            self.assertTrue((legacy / "manifest.json").is_file())
+            self.assertFalse(target.exists())
+
+
+class ImageUrlWhitelistTests(unittest.TestCase):
+    """审查建议 3：贴字表情只从 QQ 头像 CDN / 素材站取图，其余明确拒绝。"""
+
+    @staticmethod
+    def _render_module():
+        spec = importlib.util.spec_from_file_location(
+            "nw_render_whitelist_test", ROOT / "render.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        return module
+
+    def test_allows_qq_avatar_and_site_domains(self):
+        render = self._render_module()
+        site = "https://kiriyuki.com"
+        for url in (
+            "https://q1.qlogo.cn/g?b=qq&nk=10001&s=640",
+            "http://qlogo.cn/avatar.png",
+            "https://kiriyuki.com/meme/a.gif",
+            "https://cdn.kiriyuki.com/meme/a.gif",
+        ):
+            ok, reason = render.image_url_allowed(url, site)
+            self.assertTrue(ok, f"{url} 应该放行，却被拒绝：{reason}")
+
+    def test_rejects_other_and_lookalike_domains(self):
+        render = self._render_module()
+        site = "https://kiriyuki.com"
+        for url in (
+            "https://example.com/a.gif",
+            "https://evil-kiriyuki.com/a.gif",
+            "https://kiriyuki.com.evil.com/a.gif",
+            "https://qlogo.cn.evil.com/a.gif",
+            "ftp://qlogo.cn/a.gif",
+        ):
+            ok, reason = render.image_url_allowed(url, site)
+            self.assertFalse(ok, f"{url} 应该拒绝")
+            self.assertTrue(reason)
+
+    def test_load_image_checks_whitelist_before_download(self):
+        render = self._render_module()
+
+        class _Fetcher:
+            site = "https://kiriyuki.com"
+            calls = []
+
+            async def blob(self, url):
+                self.calls.append(url)
+                return b"avatar"
+
+        fetcher = _Fetcher()
+        with tempfile.TemporaryDirectory() as temp:
+            renderer = render.MemeRenderer(fetcher, temp)
+            got = asyncio.run(
+                renderer._load_image("https://q1.qlogo.cn/g?b=qq&nk=10001&s=640")
+            )
+            self.assertEqual(got, b"avatar")
+            with self.assertRaises(render.RenderError) as caught:
+                asyncio.run(renderer._load_image("https://example.com/a.gif"))
+        self.assertIn("不允许", str(caught.exception))
+        self.assertEqual(
+            fetcher.calls, ["https://q1.qlogo.cn/g?b=qq&nk=10001&s=640"]
+        )
+
+
+class LoggerImportRegressionTests(unittest.TestCase):
+    """审查建议 1：三个模块只从 astrbot.api 取 logger，不再自带 logging 兜底。"""
+
+    MODULES = ("fetcher.py", "semantic.py", "render.py")
+
+    def test_modules_only_import_logger_from_astrbot(self):
+        for name in self.MODULES:
+            source = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("from astrbot.api import logger", source, name)
+            self.assertNotIn("import logging", source, name)
+            self.assertNotIn("getLogger", source, name)
+
+    def test_modules_load_against_explicit_stub(self):
+        logger = sys.modules["astrbot.api"].logger
+        for name in self.MODULES:
+            spec = importlib.util.spec_from_file_location(
+                f"nw_{Path(name).stem}_import_test", ROOT / name
+            )
+            module = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(module)
+            self.assertIs(module.logger, logger, name)
 
 
 if __name__ == "__main__":

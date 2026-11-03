@@ -19,6 +19,7 @@ import asyncio
 import json
 import platform
 import random
+import shutil
 import sys
 import tempfile
 import time
@@ -173,20 +174,61 @@ class NekoWhaleStickers(Star):
         return SELECTOR_ALIASES.get(raw, SELECTOR_ALIASES.get(raw.lower(), "auto"))
 
     def _resolve_data_dir(self) -> Path:
-        """素材目录：显式配置 > 插件数据目录 > 老位置（已经在用的机器不重下 388MB）。"""
+        """素材目录：显式配置 > 插件数据目录；老版 /tmp 数据一次性迁过来。"""
         custom = str(self._cfg("data_dir", "") or "").strip()
         if custom:
             return Path(custom).expanduser()
-        plugin_dir: Path | None = None
         try:
             plugin_dir = Path(StarTools.get_data_dir(PLUGIN_NAME)) / "nekowhale-stickers"
         except Exception as e:
-            logger.warning(f"[nekowhale] 拿不到插件数据目录：{e}")
+            logger.warning(f"[nekowhale] 拿不到插件数据目录，暂用系统临时目录：{e}")
+            return Path(tempfile.gettempdir()) / ".astrbot" / "nekowhale-stickers"
+        if (plugin_dir / "manifest.json").is_file():
+            return plugin_dir
         legacy = Path(tempfile.gettempdir()) / ".astrbot" / "nekowhale-stickers"
-        for candidate in (plugin_dir, legacy):
-            if candidate and (candidate / "manifest.json").is_file():
-                return candidate
-        return plugin_dir or legacy
+        if (legacy / "manifest.json").is_file():
+            if self._migrate_legacy_data_dir(legacy, plugin_dir):
+                return plugin_dir
+            return legacy
+        return plugin_dir
+
+    @staticmethod
+    def _migrate_legacy_data_dir(legacy: Path, target: Path) -> bool:
+        """旧版 /tmp 素材一次性搬到插件数据目录；搬成功前不删旧目录。
+
+        先整目录复制到 ``<target>.migrating``，确认 manifest.json 在再原子改名，
+        最后才删旧目录；任一步失败都清掉半成品、保留 legacy，宁可继续用旧目录，
+        也不丢已经下好的 388MB 素材。
+        """
+        if target.exists():
+            logger.warning(f"[nekowhale] 插件数据目录里已有内容，跳过迁移：{target}")
+            return False
+        staging = target.with_name(target.name + ".migrating")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(staging, ignore_errors=True)
+            shutil.copytree(legacy, staging)
+            if not (staging / "manifest.json").is_file():
+                raise OSError("复制结果缺少 manifest.json")
+            staging.replace(target)
+        except Exception as e:
+            shutil.rmtree(staging, ignore_errors=True)
+            logger.warning(f"[nekowhale] 旧素材迁移失败，继续用 {legacy}：{e}")
+            return False
+        try:
+            shutil.rmtree(legacy)
+        except OSError as e:
+            logger.warning(f"[nekowhale] 旧素材目录没删干净（新目录已可用）：{e}")
+        try:
+            marker = target / "migrated-from-tmp.json"
+            marker.write_text(
+                json.dumps({"from": str(legacy), "at": int(time.time())}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            logger.warning(f"[nekowhale] 迁移标记没写成（不影响使用）：{e}")
+        logger.info(f"[nekowhale] 旧素材已迁移到插件数据目录：{target}")
+        return True
 
     def _vector_cache_dir(self) -> str:
         custom = str(self._cfg("cache_dir", "") or "").strip()
@@ -993,7 +1035,7 @@ class NekoWhaleStickers(Star):
         Args:
             template(string): 模板名，如 think / 想 / 举牌 / 抱
             text(string): 要贴上去的文字。想/举牌 建议 2~20 字；葱卷可到 60 字；上联下联建议 5~12 字且竖排
-            image(string): 只有 hug 用：头像图片地址或本地路径；留空则用对方的 QQ 头像
+            image(string): 只有 hug 用：头像图片地址（只接受 qlogo.cn 头像 CDN 或素材站域名）或本地路径；留空则用对方的 QQ 头像
         """
         if not self._renderer:
             return "贴字表情功能关着，没法画。"

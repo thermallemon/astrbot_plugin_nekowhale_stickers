@@ -35,6 +35,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
@@ -42,12 +43,7 @@ from typing import Any
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-try:
-    from astrbot.api import logger
-except ImportError:  # 独立跑（不带 AstrBot）时退化到标准 logging
-    import logging
-
-    logger = logging.getLogger("nekowhale")
+from astrbot.api import logger
 
 SITE_PACK = "大肥鱼"
 MEME_PACKS = ("大肥鱼",)
@@ -88,6 +84,35 @@ FALLBACK_FONTS = {
 
 class RenderError(RuntimeError):
     pass
+
+
+# 贴字表情的图片来源：QQ 头像 CDN（q1/q2...qlogo.cn）+ 配置的素材站（含子域）。
+# 只在一处校验，`/表情图 抱` 和 LLM 工具 nekowhale_meme_render 都会走到这里。
+IMAGE_HOSTS = ("qlogo.cn",)
+
+
+def image_url_allowed(url: str, site: str = "") -> tuple[bool, str]:
+    """判断贴字表情的图片地址是否允许，返回（是否允许，拒绝原因）。"""
+    try:
+        parsed = urllib.parse.urlsplit((url or "").strip())
+    except ValueError:
+        return False, "地址格式不对"
+    if parsed.scheme not in ("http", "https"):
+        return False, "只支持 http(s) 地址"
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if not host:
+        return False, "地址里没有域名"
+    allowed = set(IMAGE_HOSTS)
+    try:
+        site_host = (urllib.parse.urlsplit(site or "").hostname or "").lower().rstrip(".")
+    except ValueError:
+        site_host = ""
+    if site_host:
+        allowed.add(site_host)
+    for domain in allowed:
+        if host == domain or host.endswith("." + domain):
+            return True, ""
+    return False, f"域名 {host} 不在允许范围"
 
 
 # --------------------------------------------------------------- 文本排版
@@ -428,6 +453,12 @@ class MemeRenderer:
         if not src:
             raise RenderError("没有拿到头像图")
         if src.startswith("http://") or src.startswith("https://"):
+            ok, reason = image_url_allowed(src, getattr(self.fetcher, "site", ""))
+            if not ok:
+                raise RenderError(
+                    f"头像地址不允许：{reason}。只支持 QQ 头像 CDN（qlogo.cn）、"
+                    "素材站域名或本地文件路径"
+                )
             return await self.fetcher.blob(src)
         p = Path(src).expanduser()
         if not p.is_file():

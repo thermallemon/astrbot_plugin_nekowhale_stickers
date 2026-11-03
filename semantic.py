@@ -29,12 +29,7 @@ from typing import Any
 
 import numpy as np
 
-try:
-    from astrbot.api import logger
-except ImportError:  # 独立跑（不带 AstrBot）时退化到标准 logging
-    import logging
-
-    logger = logging.getLogger("nekowhale")
+from astrbot.api import logger
 
 
 def _provider_type_of(inst: Any) -> str:
