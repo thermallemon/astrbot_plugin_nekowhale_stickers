@@ -25,7 +25,7 @@ desc: |-
   https://github.com/Loping151/dsh-nekowhale-stickers（Apache-2.0）；
   大肥鱼形象基于 ZipZipPipe 与 上善无形，GPT娘形象基于 ZipZipPipe。
   表情素材仅运行时拉取、不做镜像、不做二次分发。
-version: 2.3.3
+version: 2.3.4
 author: in1t1a1
 repo: https://github.com/thermallemon/astrbot_plugin_nekowhale_stickers
 astrbot_version: ">=4.11.0"

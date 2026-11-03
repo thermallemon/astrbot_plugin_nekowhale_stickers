@@ -35,7 +35,7 @@ from typing import Any
 
 from astrbot.api import logger
 
-PLUGIN_VERSION = "2.3.3"
+PLUGIN_VERSION = "2.3.4"
 USER_AGENT = f"astrbot-plugin-nekowhale-stickers/{PLUGIN_VERSION} (+https://kiriyuki.com)"
 
 KIT_MANIFEST = "/api/kit/nekowhale"
