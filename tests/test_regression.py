@@ -905,26 +905,95 @@ class TgSendTests(unittest.TestCase):
             self.assertFalse(head.startswith("from telegram"), head)
 
     def test_failed_convert_leaves_no_partial_cache_file(self):
-            try:
-                from PIL import Image, ImageDraw
-            except ImportError:  # pragma: no cover - Pillow 是 AstrBot 自带依赖
-                self.skipTest("没有 Pillow")
-            src = self.dir / "real.gif"
-            frames = []
-            for i in range(3):
-                im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-                ImageDraw.Draw(im).rectangle([i * 10, 10, i * 10 + 30, 40], fill=(0, 200, 120, 255))
-                frames.append(im)
-            frames[0].save(src, save_all=True, append_images=frames[1:], duration=100, loop=0, disposal=2)
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:  # pragma: no cover - Pillow 是 AstrBot 自带依赖
+            self.skipTest("没有 Pillow")
+        src = self.dir / "real.gif"
+        frames = []
+        for i in range(3):
+            im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            ImageDraw.Draw(im).rectangle([i * 10, 10, i * 10 + 30, 40], fill=(0, 200, 120, 255))
+            frames.append(im)
+        frames[0].save(src, save_all=True, append_images=frames[1:], duration=100, loop=0, disposal=2)
 
-            cache = self.dir / "broken"
-            bridge = TG.TgStickerBridge(cache, ffmpeg=sys.executable)  # python 不认 ffmpeg 参数 -> 非零退出
+        cache = self.dir / "broken"
+        bridge = TG.TgStickerBridge(cache)
+        original = TG.subprocess.run
+        # 假 ffmpeg：非零退出、什么都不写；mkstemp 建的临时文件必须被清干净
+        TG.subprocess.run = lambda args, **kwargs: SimpleNamespace(returncode=1, stderr=b"boom", stdout=b"")
+        try:
             sent = asyncio.run(bridge.send(_TgEvent(client=_TgClient()), src))
-            self.assertIsNone(sent)
-            self.assertIn("转码失败", bridge.last_error)
-            leftovers = [p.name for p in cache.rglob("*") if p.is_file()]
-            self.assertEqual(leftovers, [])
-            self.assertEqual(bridge.converted, 0)
+        finally:
+            TG.subprocess.run = original
+        self.assertIsNone(sent)
+        self.assertIn("转码失败", bridge.last_error)
+        leftovers = [p.name for p in cache.rglob("*") if p.is_file()]
+        self.assertEqual(leftovers, [])
+        self.assertEqual(bridge.converted, 0)
+
+    def test_each_conversion_uses_its_own_temp_file(self):
+        """同一成品名连转两次也不许共用 out.part：临时名各自独有，成品仍只有一个。"""
+        cache = self.dir / "uniq"
+        bridge = TG.TgStickerBridge(cache)
+        bridge._frames = lambda src: (b"\x00" * 16, 10)  # 不真解图，这里只验临时文件名
+        out = bridge.cache_path(self.src)
+        seen = []
+
+        def fake_run(args, **kwargs):
+            tmp = Path(args[-1])
+            seen.append(tmp)
+            tmp.write_bytes(b"webm")  # 假装 ffmpeg 已经写好
+            return SimpleNamespace(returncode=0, stderr=b"")
+
+        original = TG.subprocess.run
+        TG.subprocess.run = fake_run
+        try:
+            bridge._convert("ffmpeg", self.src, out)
+            bridge._convert("ffmpeg", self.src, out)
+        finally:
+            TG.subprocess.run = original
+
+        self.assertEqual(len(seen), 2)
+        self.assertNotEqual(seen[0].name, seen[1].name)
+        for tmp in seen:
+            self.assertEqual(tmp.parent, bridge.cache_dir)
+            self.assertTrue(tmp.name.endswith(".webm.part"), tmp.name)
+        self.assertEqual([p.name for p in cache.rglob("*.part")], [])
+        self.assertEqual(out.read_bytes(), b"webm")
+
+    def test_frames_stop_at_useful_cap_not_max_frames(self):
+        """3 秒 × 30fps 就够用：200 帧的 GIF 只解 90 帧，不为 240 帧再攒 RGBA。"""
+        try:
+            from PIL import Image
+        except ImportError:  # pragma: no cover
+            self.skipTest("没有 Pillow")
+        src = self.dir / "long.gif"
+        # 每帧颜色不同：GIF 会把完全相同的帧去重，那样就测不到 200 帧
+        frames = [Image.new("RGBA", (8, 8), (i % 256, 40, 60, 128)) for i in range(200)]
+        # 20ms/帧 = 50fps：时长上限本可解 150 帧，靠 30fps 的硬上限先截到 90
+        frames[0].save(src, save_all=True, append_images=frames[1:], duration=20, loop=0, disposal=2)
+
+        class _Tiny:
+            def tobytes(self):
+                return b"f"
+
+        calls = []
+
+        def _fake_fit(frame):
+            calls.append(1)
+            return _Tiny()
+
+        original = TG.TgStickerBridge.__dict__["_fit"]  # 取 staticmethod 本体，恢复后不能变成实例方法
+        TG.TgStickerBridge._fit = staticmethod(_fake_fit)
+        try:
+            raw, fps = TG.TgStickerBridge(self.dir / "frames")._frames(src)
+        finally:
+            TG.TgStickerBridge._fit = original
+
+        self.assertEqual(fps, TG.TG_MAX_FPS)  # 20ms/帧 → 50fps，被夹到 30
+        self.assertEqual(len(calls), 90)  # 3.0s × 30fps 的解帧硬上限，不是 200/240
+        self.assertEqual(len(raw), 90)  # 正好 3 秒，不用再截
 
 
 @unittest.skipUnless(TG.locate_ffmpeg(), "本机没有 ffmpeg，跳过真实转码样本")

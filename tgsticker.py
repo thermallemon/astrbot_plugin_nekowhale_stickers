@@ -29,6 +29,7 @@ import inspect
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -284,7 +285,13 @@ class TgStickerBridge:
     def _convert(self, ffmpeg: str, src: Path, out: Path) -> None:
         raw, fps = self._frames(src)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_name(out.name + ".part")
+        # 临时文件用 mkstemp 每次取独有名：同源并发转码不会互相覆盖，也不会把
+        # 半成品写到别人正在读的成品名上。fd 立刻关掉，后面交给 ffmpeg 写。
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=out.stem + ".", suffix=".webm.part", dir=str(self.cache_dir)
+        )
+        os.close(fd)
+        tmp = Path(tmp_name)
         args = [
             ffmpeg,
             "-hide_banner",
@@ -348,7 +355,10 @@ class TgStickerBridge:
         durations: list[int] = []
         with Image.open(src) as im:
             total = int(getattr(im, "n_frames", 1) or 1)
-            limit = max(1, min(total, self.max_frames))
+            # 3 秒 × 30fps 已经把时长撑满，多解的帧最后也要丢掉：先按这个硬上限
+            # 截住，省得把 240 帧 512×512 RGBA（每帧 1MB）全积在内存里。
+            useful = int(self.max_seconds * TG_MAX_FPS) or 1
+            limit = max(1, min(total, self.max_frames, useful))
             elapsed_ms = 0
             budget_ms = self.max_seconds * 1000.0
             for index in range(limit):
