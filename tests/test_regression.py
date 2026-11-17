@@ -12,6 +12,7 @@ import logging
 import os
 import random
 import shutil
+import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -129,6 +130,7 @@ _NS = _extract_main_functions(
     "_cooldown_blocked",
     "_choose",
     "_deliver",
+    "_tg_send",
     "_after_sent_impl",
 )
 
@@ -213,10 +215,35 @@ class _Context:
         return self.result
 
 
+class _TgBridge:
+    """TgStickerBridge 的最小替身：默认「不走 TG」，保持 QQ 原有断言不变。
+
+    result 三态跟真实桥一致：None = 没走原生贴纸（回退原 Image 路径）；
+    True = Telegram 明确发成功；False = 已经尝试发过但失败（不许再补发）。
+    """
+
+    def __init__(self, result=None, error=None, enabled=True):
+        self.result = result
+        self.error = error
+        self.enabled = enabled
+        self.last_error = ""
+        self.calls = []
+
+    async def send(self, event, path):
+        self.calls.append((event, path))
+        if self.error:
+            raise self.error
+        return self.result
+
+    def stats(self):
+        return {"enabled": self.enabled, "cache_dir": "", "cache_hits": 0, "converted": 0,
+                "max_bytes": 0, "last_error": self.last_error}
+
+
 class _Subject:
     """Small object exposing only collaborators used by extracted methods."""
 
-    def __init__(self, cfg=None, *, items=None, picker=None, kit=None, context=None):
+    def __init__(self, cfg=None, *, items=None, picker=None, kit=None, context=None, tg=None):
         self.cfg = dict(cfg or {})
         self._cooldown = {}
         self._cooldown_remain = 0
@@ -227,6 +254,7 @@ class _Subject:
         self._picker = picker or _Picker()
         self._kit = kit or _Kit()
         self.context = context or _Context()
+        self._tg = tg or _TgBridge()
         self._recent = defaultdict(list)
         self._vector_task = None
         self._build_attempted = True
@@ -254,6 +282,9 @@ class _Subject:
 
     async def _deliver(self, event, item):
         return await _NS["_deliver"](self, event, item)
+
+    async def _tg_send(self, event, path):
+        return await _NS["_tg_send"](self, event, path)
 
     async def _after_sent_impl(self, event):
         return await _NS["_after_sent_impl"](self, event)
@@ -627,6 +658,424 @@ class LoggerImportRegressionTests(unittest.TestCase):
             assert spec.loader is not None
             spec.loader.exec_module(module)
             self.assertIs(module.logger, logger, name)
+
+
+# --------------------------------------------------------------------- TG
+_NS_TOOLS = _extract_main_functions(
+    "_tg_send",
+    "_inline",
+    "tool_send",
+    "tool_render",
+    overrides={
+        # 只用到名字映射，不必真去 import render.py 的模板表
+        "TEMPLATE_LABELS": {"think": "想", "sign": "举牌"},
+        "RenderError": type("RenderError", (Exception,), {}),
+    },
+)
+
+
+def _load_tgsticker():
+    spec = importlib.util.spec_from_file_location("nw_tgsticker_for_tests", ROOT / "tgsticker.py")
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+TG = _load_tgsticker()
+
+
+class _TgClient:
+    """假装成 AstrBot 平台实例上的 PTB ExtBot：只提供 send_sticker。"""
+
+    def __init__(self, error=None, delay=0.0):
+        self.error = error
+        self.delay = delay
+        self.calls = []
+
+    async def send_sticker(self, chat_id=None, sticker=None):
+        self.calls.append(
+            {
+                "chat_id": chat_id,
+                "name": getattr(sticker, "name", ""),
+                "readable": hasattr(sticker, "read"),
+            }
+        )
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error:
+            raise self.error
+        return {"message_id": 1}
+
+
+class _TgEvent:
+    """最小事件桩：能给出平台名、client 和 chat_id。"""
+
+    def __init__(self, platform="telegram", chat_id=123456, client=..., umo="telegram:group:1"):
+        self._platform = platform
+        self.chat_id = chat_id
+        self.unified_msg_origin = umo
+        self.get_sender_id = lambda: "9"
+        if client is not ...:
+            self.client = client
+
+    def get_platform_name(self):
+        return self._platform
+
+    def get_group_id(self):
+        return str(self.chat_id)
+
+
+class TgRouteTests(unittest.TestCase):
+    """路由：只有 Telegram + 有 send_sticker + 拿得到 chat_id 才走原生贴纸。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = Path(self.temp.name)
+
+    def _bridge(self, **kwargs):
+        return TG.TgStickerBridge(self.dir / "cache", **kwargs)
+
+    def test_qq_event_never_routes_to_sticker(self):
+        bridge = self._bridge()
+        event = _TgEvent(platform="aiocqhttp", client=_TgClient())
+        self.assertIsNone(bridge.route(event))
+        self.assertEqual(bridge.last_error, "")
+
+    def test_disabled_switch_routes_nowhere(self):
+        bridge = self._bridge(enabled=False)
+        self.assertIsNone(bridge.route(_TgEvent(client=_TgClient())))
+
+    def test_missing_client_or_send_sticker_falls_back(self):
+        bridge = self._bridge()
+        self.assertIsNone(bridge.route(_TgEvent(client=...)))
+        self.assertIn("send_sticker", bridge.last_error)
+        self.assertIsNone(bridge.route(_TgEvent(client=SimpleNamespace(send_message=None))))
+        self.assertIn("send_sticker", bridge.last_error)
+
+    def test_missing_chat_id_falls_back(self):
+        bridge = self._bridge()
+        event = _TgEvent(client=_TgClient())
+        del event.chat_id
+        event.get_group_id = lambda: None
+        event.get_sender_id = lambda: None
+        self.assertIsNone(bridge.route(event))
+        self.assertIn("chat_id", bridge.last_error)
+
+    def test_route_returns_client_and_chat_id(self):
+        client = _TgClient()
+        bridge = self._bridge()
+        self.assertEqual(bridge.route(_TgEvent(chat_id=777, client=client)), (client, 777))
+
+    def test_chat_id_prefers_chat_over_sender(self):
+        event = _TgEvent(chat_id="group-1")
+        event.get_sender_id = lambda: "user-9"
+        self.assertEqual(TG.resolve_chat_id(event), "group-1")
+        event = _TgEvent()
+        del event.chat_id
+        event.get_group_id = lambda: "g-2"
+        event.get_sender_id = lambda: "user-9"
+        self.assertEqual(TG.resolve_chat_id(event), "g-2")
+
+    def test_platform_name_tolerates_other_shapes(self):
+        class _Bare:
+            platform_name = "Telegram"
+
+        self.assertTrue(TG.is_telegram(_Bare()))
+        self.assertFalse(TG.is_telegram(SimpleNamespace()))
+        self.assertFalse(TG.is_telegram(SimpleNamespace(platform_meta=SimpleNamespace(name="aiocqhttp"))))
+
+    def test_other_platforms_do_not_match_by_substring(self):
+        # 只有真 Telegram；qq_official / dingtalk / lark 一个都不许命中
+        for name in ("aiocqhttp", "qq_official", "dingtalk", "lark", "satori", "webchat"):
+            self.assertFalse(TG.is_telegram(SimpleNamespace(platform_name=name)), name)
+        self.assertTrue(TG.is_telegram(SimpleNamespace(platform_name="telegram")))
+
+    def test_sender_id_is_never_used_as_chat(self):
+        # 拿不到会话 id 时宁可不发原生贴纸，也不能把群表情发成私聊
+        event = _TgEvent()
+        del event.chat_id
+        event.get_group_id = lambda: None
+        event.get_sender_id = lambda: "user-9"
+        self.assertIsNone(TG.resolve_chat_id(event))
+
+
+class TgSendTests(unittest.TestCase):
+    """发送三态：None 可回退原路，True/False 都表示已经尝试过、不许补发。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.dir = Path(self.temp.name)
+        self.src = self.dir / "sticker.gif"
+        self.src.write_bytes(b"GIF89a")  # 内容不重要，测试只走缓存命中
+
+    def _bridge(self, **kwargs):
+        bridge = TG.TgStickerBridge(self.dir / "cache", **kwargs)
+        seeded = bridge.cache_path(self.src)
+        seeded.parent.mkdir(parents=True, exist_ok=True)
+        seeded.write_bytes(b"webm-bytes")
+        return bridge, seeded
+
+    def test_success_uploads_webm_handle_and_counts(self):
+        bridge, seeded = self._bridge()
+        client = _TgClient()
+        self.assertTrue(asyncio.run(bridge.send(_TgEvent(chat_id=42, client=client), self.src)))
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.calls[0]["chat_id"], 42)
+        self.assertTrue(client.calls[0]["name"].endswith(".webm"))
+        self.assertEqual(bridge.cache_hits, 1)
+        self.assertEqual(bridge.last_error, "")
+
+    def test_send_failure_returns_false_without_retry(self):
+        bridge, _ = self._bridge()
+        client = _TgClient(error=RuntimeError("Bad Request: STICKER_VIDEO_BIG"))
+        sent = asyncio.run(bridge.send(_TgEvent(client=client), self.src))
+        self.assertIs(sent, False)
+        self.assertEqual(len(client.calls), 1)
+        self.assertIn("send_sticker 失败", bridge.last_error)
+
+    def test_timeout_returns_false_not_none(self):
+        bridge, _ = self._bridge(send_timeout=0.05)
+        client = _TgClient(delay=0.3)
+        sent = asyncio.run(bridge.send(_TgEvent(client=client), self.src))
+        self.assertIs(sent, False)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_no_client_returns_none_so_caller_can_fall_back(self):
+        bridge, _ = self._bridge()
+        self.assertIsNone(asyncio.run(bridge.send(_TgEvent(client=...), self.src)))
+
+    def test_convert_failure_returns_none_and_writes_no_cache(self):
+        bridge = TG.TgStickerBridge(self.dir / "fresh", ffmpeg=str(self.dir / "nope-ffmpeg.exe"))
+        sent = asyncio.run(bridge.send(_TgEvent(client=_TgClient()), self.src))
+        self.assertIsNone(sent)
+        self.assertIn("转码失败", bridge.last_error)
+        self.assertEqual(bridge.converted, 0)
+        leftovers = list((self.dir / "fresh").rglob("*")) if (self.dir / "fresh").exists() else []
+        self.assertEqual([p for p in leftovers if p.is_file()], [])
+
+    def test_oversized_cache_entry_is_dropped_and_reencoded_never_sent(self):
+        bridge = TG.TgStickerBridge(self.dir / "cache", max_bytes=4)
+        seeded = bridge.cache_path(self.src)
+        seeded.parent.mkdir(parents=True, exist_ok=True)
+        seeded.write_bytes(b"x" * 50)
+        client = _TgClient()
+        sent = asyncio.run(bridge.send(_TgEvent(client=client), self.src))
+        self.assertIsNone(sent)  # 超限：不发，退回原路，绝不当作已发
+        self.assertEqual(client.calls, [])
+        self.assertIn("转码失败", bridge.last_error)
+
+    def test_sdk_rejecting_file_object_falls_back_without_counting(self):
+        class _Picky:
+            def send_sticker(self, chat_id, sticker):  # 老 SDK：只接受 file_id
+                raise TypeError("sticker must be a file_id")
+
+        if not TG.locate_ffmpeg():
+            self.skipTest("本机没有 ffmpeg")
+        try:
+            from PIL import Image
+        except ImportError:  # pragma: no cover
+            self.skipTest("没有 Pillow")
+        src = self.dir / "picky.png"
+        Image.new("RGBA", (40, 40), (30, 60, 90, 0)).save(src)
+        bridge = TG.TgStickerBridge(self.dir / "cache")
+        # None = 一个字节都没发出去，外层可以安全走普通图片，也不算成功
+        self.assertIsNone(asyncio.run(bridge.send(_TgEvent(client=_Picky()), src)))
+        self.assertIn("不接受文件对象", bridge.last_error)
+
+    def test_bogus_configured_ffmpeg_falls_back_to_locate(self):
+        if not TG.locate_ffmpeg():
+            self.skipTest("本机没有 ffmpeg")
+        try:
+            from PIL import Image
+        except ImportError:  # pragma: no cover
+            self.skipTest("没有 Pillow")
+        src = self.dir / "fallback.png"
+        Image.new("RGBA", (40, 40), (10, 20, 30, 0)).save(src)
+        bridge = TG.TgStickerBridge(self.dir / "cache", ffmpeg=str(self.dir / "no-such-ffmpeg.exe"))
+        self.assertIsNotNone(asyncio.run(bridge.prepare(src)), bridge.last_error)
+
+    def test_ffmpeg_is_never_imported_from_telegram(self):
+        source = (ROOT / "tgsticker.py").read_text(encoding="utf-8")
+        for line in source.splitlines():
+            head = line.strip()
+            self.assertFalse(head.startswith("import telegram"), head)
+            self.assertFalse(head.startswith("from telegram"), head)
+
+    def test_failed_convert_leaves_no_partial_cache_file(self):
+            try:
+                from PIL import Image, ImageDraw
+            except ImportError:  # pragma: no cover - Pillow 是 AstrBot 自带依赖
+                self.skipTest("没有 Pillow")
+            src = self.dir / "real.gif"
+            frames = []
+            for i in range(3):
+                im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+                ImageDraw.Draw(im).rectangle([i * 10, 10, i * 10 + 30, 40], fill=(0, 200, 120, 255))
+                frames.append(im)
+            frames[0].save(src, save_all=True, append_images=frames[1:], duration=100, loop=0, disposal=2)
+
+            cache = self.dir / "broken"
+            bridge = TG.TgStickerBridge(cache, ffmpeg=sys.executable)  # python 不认 ffmpeg 参数 -> 非零退出
+            sent = asyncio.run(bridge.send(_TgEvent(client=_TgClient()), src))
+            self.assertIsNone(sent)
+            self.assertIn("转码失败", bridge.last_error)
+            leftovers = [p.name for p in cache.rglob("*") if p.is_file()]
+            self.assertEqual(leftovers, [])
+            self.assertEqual(bridge.converted, 0)
+
+
+@unittest.skipUnless(TG.locate_ffmpeg(), "本机没有 ffmpeg，跳过真实转码样本")
+class TgRealEncodeTests(unittest.TestCase):
+    """本机有 ffmpeg 时跑一次真转码：必须 VP9/512×512，且解码后确实还有透明像素。"""
+
+    def test_dynamic_transparent_gif_becomes_vp9_with_alpha(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:  # pragma: no cover
+            self.skipTest("没有 Pillow")
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            src = work / "sample.gif"
+            frames = []
+            for i in range(6):
+                im = Image.new("RGBA", (300, 300), (0, 0, 0, 0))
+                ImageDraw.Draw(im).ellipse([40 + i * 15, 80, 160 + i * 15, 200], fill=(255, 120, 140, 255))
+                frames.append(im)
+            frames[0].save(src, save_all=True, append_images=frames[1:], duration=80, loop=0, disposal=2)
+
+            bridge = TG.TgStickerBridge(work / "cache")
+            out = asyncio.run(bridge.prepare(src))
+            self.assertIsNotNone(out, bridge.last_error)
+            self.assertEqual(out.suffix, ".webm")
+            self.assertLessEqual(out.stat().st_size, bridge.max_bytes)
+
+            ffmpeg = TG.locate_ffmpeg()
+            side = TG.TG_SIDE
+            raw = subprocess.run(
+                [ffmpeg, "-v", "error", "-c:v", "libvpx-vp9", "-i", str(out),
+                 "-f", "rawvideo", "-pix_fmt", "rgba", "-frames:v", "1", "pipe:1"],
+                capture_output=True,
+            ).stdout
+            self.assertEqual(len(raw), side * side * 4)
+            alphas = raw[3::4]
+            self.assertTrue(any(a < 16 for a in alphas), "解码后没有透明像素：alpha 通道丢了")
+            self.assertTrue(any(a > 240 for a in alphas), "解码后没有不透明像素")
+            self.assertEqual(bridge.converted, 1)
+
+            again = asyncio.run(bridge.prepare(src))
+            self.assertEqual(again, out)
+            self.assertEqual(bridge.cache_hits, 1)
+            self.assertEqual(bridge.converted, 1)
+
+
+class TgCallPathTests(unittest.TestCase):
+    """插件四条发图路径：TG 成功/失败都不许再补发，QQ 原路一个字不动。"""
+
+    ITEM = {"id": "1", "name": "摸鱼", "emotion": "开心", "bytes": 2048}
+
+    def _subject(self, tg=None, **kwargs):
+        subject = _Subject(items=[self.ITEM], tg=tg, **kwargs)
+        subject._resolve_item = lambda name: self.ITEM
+        subject._index.search = lambda name, limit=3: []
+        subject._renderer = SimpleNamespace(render=self._fake_render)
+        subject._avatar_url = lambda event: None
+        subject._template_of = lambda name: "think"
+        return subject
+
+    async def _fake_render(self, tpl, text, image=None):
+        path = Path(self._render_path)
+        path.write_bytes(b"GIF89a")
+        return path
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self._render_path = str(Path(self.temp.name) / "meme.gif")
+
+    def test_deliver_keeps_qq_path_on_none(self):
+        event = _Event("aiocqhttp:group:1")
+        subject = self._subject(tg=_TgBridge(result=None))
+        self.assertTrue(asyncio.run(subject._deliver(event, self.ITEM)))
+        self.assertEqual(len(event.send_calls), 1)
+        self.assertEqual(subject.context.calls, [])
+
+    def test_deliver_does_not_resend_when_sticker_already_sent(self):
+        for result in (True, False):
+            with self.subTest(result=result):
+                event = _Event("telegram:group:1")
+                subject = self._subject(tg=_TgBridge(result=result))
+                got = asyncio.run(subject._deliver(event, self.ITEM))
+                self.assertIs(got, result)
+                self.assertEqual(event.send_calls, [])
+                self.assertEqual(subject.context.calls, [])
+                if result is False:
+                    self.assertIn("TG 贴纸发送失败", subject._skip_reason)
+
+    def test_deliver_treats_bridge_crash_as_attempted(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(error=RuntimeError("boom")))
+        self.assertFalse(asyncio.run(subject._deliver(event, self.ITEM)))
+        self.assertEqual(event.send_calls, [])
+        self.assertEqual(subject.context.calls, [])
+
+    def test_deliver_with_real_bridge_on_qq_leaves_state_untouched(self):
+        bridge = TG.TgStickerBridge(Path(self.temp.name) / "cache", ffmpeg=str(Path(self.temp.name) / "no-ffmpeg"))
+        event = _Event("aiocqhttp:group:1")
+        subject = self._subject(tg=bridge)
+        self.assertTrue(asyncio.run(subject._deliver(event, self.ITEM)))
+        self.assertEqual(len(event.send_calls), 1)
+        self.assertEqual(bridge.last_error, "")
+        self.assertEqual(bridge.converted, 0)
+
+    def test_tool_send_reports_failure_without_marking_sent(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(result=False))
+        reply = asyncio.run(_NS_TOOLS["tool_send"](subject, event, "摸鱼"))
+        self.assertIn("发图失败", reply)
+        self.assertFalse(event.get_extra("_nekowhale_already_sent"))
+        self.assertEqual(event.send_calls, [])
+
+    def test_tool_send_success_skips_image_and_marks_sent(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(result=True))
+        reply = asyncio.run(_NS_TOOLS["tool_send"](subject, event, "摸鱼"))
+        self.assertIn("已发出", reply)
+        self.assertTrue(event.get_extra("_nekowhale_already_sent"))
+        self.assertEqual(event.send_calls, [])
+
+    def test_tool_render_reports_failure_without_marking_sent(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(result=False))
+        reply = asyncio.run(_NS_TOOLS["tool_render"](subject, event, "想", "上班", ""))
+        self.assertIn("发送失败", reply)
+        self.assertFalse(event.get_extra("_nekowhale_already_sent"))
+
+    def test_inline_counts_only_when_really_sent(self):
+        event = _Event("telegram:group:1")
+        event.get_result = lambda: _Result()
+        event.get_message_str = lambda: "u"
+        subject = self._subject(tg=_TgBridge(result=True))
+        subject._index.item = self.ITEM
+        subject._picker = _Picker(result=(self.ITEM, {"stage": "keyword", "sim": 0.5}))
+        asyncio.run(_NS_TOOLS["_inline"](subject, event, {"user_text": "u", "reply_text": "r"}))
+        self.assertTrue(event.get_extra("_nekowhale_picked"))
+        self.assertEqual(subject._recent["telegram:group:1"], ["1"])
+        self.assertEqual(event.get_result().chain, [])
+
+        event = _Event("telegram:group:1")
+        event.get_result = lambda: _Result()
+        event.get_message_str = lambda: "u"
+        subject = self._subject(tg=_TgBridge(result=False))
+        subject._index.item = self.ITEM
+        subject._picker = _Picker(result=(self.ITEM, {"stage": "keyword", "sim": 0.5}))
+        asyncio.run(_NS_TOOLS["_inline"](subject, event, {"user_text": "u", "reply_text": "r"}))
+        self.assertFalse(event.get_extra("_nekowhale_picked"))
+        self.assertEqual(subject._recent["telegram:group:1"], [])
+        self.assertEqual(subject._cooldown, {})
+        self.assertEqual(event.get_result().chain, [])
 
 
 if __name__ == "__main__":

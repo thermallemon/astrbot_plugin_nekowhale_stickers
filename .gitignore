@@ -5,3 +5,5 @@ venv/
 renders/
 packs/
 *.part
+tg_cache/
+tg_stickers/

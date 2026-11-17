@@ -144,6 +144,18 @@
     "hint": "超过这个大小的表情不会进入候选池。默认 3 MB，可避免发出 5MB 的大图。",
     "default": 3.0
   },
+  "tg_native_sticker": {
+    "type": "bool",
+    "description": "Telegram 用原生贴纸发送",
+    "hint": "开：在 Telegram 里把表情转成带透明通道的 WEBM，用 send_sticker 发成原生贴纸（需要本机有 ffmpeg，找不到就自动退回普通图片，不会报成功）。关：和 QQ 一样直接发图片/GIF。QQ 不受这个开关影响。",
+    "default": true
+  },
+  "tg_ffmpeg_path": {
+    "type": "string",
+    "description": "ffmpeg 路径（可留空）",
+    "hint": "留空自动找：先看环境变量 NEKOWHALE_FFMPEG，再看 PATH，最后看几个常见安装路径。插件不会自己装 ffmpeg。",
+    "default": ""
+  },
   "top_n": {
     "type": "int",
     "description": "关键词模式的候选数量",

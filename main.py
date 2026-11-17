@@ -40,6 +40,7 @@ from .fetcher import FetchError, KitFetcher
 from .render import TEMPLATE_LABELS, TEMPLATES, MemeRenderer, RenderError
 from .semantic import DEFAULT_MIN_SIM, DEFAULT_RECALL_K, SemanticPicker
 from .sticker_index import StickerIndex, norm_packs
+from .tgsticker import TgStickerBridge
 
 PLUGIN_NAME = "astrbot_plugin_nekowhale_stickers"
 PLUGIN_VERSION = "2.3.4"
@@ -124,6 +125,13 @@ class NekoWhaleStickers(Star):
                 self._kit,
                 cache_dir=self._data_dir,
             )
+
+        # TG 原生贴纸（send_sticker）：只影响 Telegram 分支，QQ 走原来的 Image 路径。
+        self._tg = TgStickerBridge(
+            self._data_dir / "tg_cache",
+            enabled=bool(self._cfg("tg_native_sticker", True)),
+            ffmpeg=str(self._cfg("tg_ffmpeg_path", "") or "").strip() or None,
+        )
 
         self._index = self._make_index({}, {})
         self._loaded = False
@@ -576,6 +584,19 @@ class NekoWhaleStickers(Star):
         self._skip_reason = "语义向量未就绪且未开启关键词兜底"
         return None, {"stage": "semantic-not-ready"}
 
+    async def _tg_send(self, event: AstrMessageEvent, path: Path) -> bool | None:
+        """TG 原生贴纸分支：None = 没走这条路（可以安全地走原路）。
+
+        True/False 表示已经向 Telegram 尝试过发送，外层不能再补发一次 Image，
+        否则同一条表情会到群里两遍；失败也不记成功，交给调用方如实报错。
+        """
+        try:
+            return await self._tg.send(event, path)
+        except Exception as e:
+            logger.warning(f"[nekowhale] TG 原生贴纸异常，本次不再补发：{e}")
+            self._tg.last_error = str(e)
+            return False
+
     async def _deliver(self, event: AstrMessageEvent, item: dict[str, Any]) -> bool:
         try:
             path = await self._kit.ensure_sticker(item)
@@ -583,6 +604,11 @@ class NekoWhaleStickers(Star):
             logger.warning(f"[nekowhale] 表情下载失败 {item.get('id')}：{e}")
             self._skip_reason = f"下载失败：{e}"
             return False
+        sent = await self._tg_send(event, path)
+        if sent is not None:
+            if not sent:
+                self._skip_reason = f"TG 贴纸发送失败：{self._tg.last_error}"
+            return sent
         chain = MessageChain([Image.fromFileSystem(str(path))])
         umo = event.unified_msg_origin
         errors: list[str] = []
@@ -705,7 +731,14 @@ class NekoWhaleStickers(Star):
         except Exception as e:
             logger.warning(f"[nekowhale] 表情下载失败 {item.get('id')}：{e}")
             return
-        result.chain.append(Image.fromFileSystem(str(path)))
+        sent = await self._tg_send(event, path)
+        if sent is not None:
+            if not sent:
+                self._skip_reason = f"TG 贴纸发送失败：{self._tg.last_error}"
+                logger.warning(f"[nekowhale] {umo} 原生贴纸没发出去，本轮不补发")
+                return
+        else:
+            result.chain.append(Image.fromFileSystem(str(path)))
         self._recent[umo].append(str(item["id"]))
         self._cooldown[umo] = self._cooldown_count()
         event.set_extra(EXTRA_PICKED, True)
@@ -784,6 +817,10 @@ class NekoWhaleStickers(Star):
             f"向量：{'就绪' if sem['ready'] else '未就绪'} "
             f"{sem['vectors']} 张 dim={sem['dim']}（{sem['model'] or '未建库'}）",
             f"精选模型：{sem['rerank_provider'] or '关闭'}（{'开' if sem['llm'] else '关'}）",
+            f"TG 原生贴纸：{'开' if self._tg.enabled else '关'}"
+            f"（已转 {self._tg.stats()['converted']} 张 / 命中缓存 {self._tg.stats()['cache_hits']} 次"
+            + (f"，最近错误：{self._tg.last_error}" if self._tg.last_error else "")
+            + "）",
             f"贴字表情：{'开' if self._renderer else '关'}"
             f"（模板 {'/'.join(TEMPLATE_LABELS.values())}）",
             f"下载站：{kit['site']}｜本次运行已下 {kit['downloaded']} 张 {kit['downloaded_mb']}MB",
@@ -918,6 +955,12 @@ class NekoWhaleStickers(Star):
             logger.exception("[nekowhale] 贴字表情失败")
             yield event.plain_result(f"画不出来：{e}")
             return
+        sent = await self._tg_send(event, path)
+        if sent is True:
+            return
+        if sent is False:
+            yield event.plain_result(f"图做好了但发送失败（{self._tg.last_error}）")
+            return
         yield event.image_result(str(path))
 
     # ------------------------------------------------------------ llm tools
@@ -979,10 +1022,14 @@ class NekoWhaleStickers(Star):
             path = await self._kit.ensure_sticker(item)
         except Exception as e:
             return f"这张表情下载失败了（{e}），这次别发图，正常回话。"
-        try:
-            await event.send(MessageChain([Image.fromFileSystem(str(path))]))
-        except Exception as e:
-            return f"发图失败（{e}），别重试，正常回话。"
+        sent = await self._tg_send(event, path)
+        if sent is None:
+            try:
+                await event.send(MessageChain([Image.fromFileSystem(str(path))]))
+            except Exception as e:
+                return f"发图失败（{e}），别重试，正常回话。"
+        elif not sent:
+            return f"发图失败（{self._tg.last_error}），别重试，正常回话。"
         event.set_extra(EXTRA_SENT, True)
         return f"已发出表情「{item['name'] or item['id']}」〔{item.get('emotion') or '无情绪'}〕，不用再描述这张图。"
 
@@ -1051,10 +1098,14 @@ class NekoWhaleStickers(Star):
         except Exception as e:
             logger.exception("[nekowhale] 贴字表情失败")
             return f"画不出来（{e}），别重试。"
-        try:
-            await event.send(MessageChain([Image.fromFileSystem(str(path))]))
-        except Exception as e:
-            return f"图做好了但发送失败（{e}），别再画了。"
+        sent = await self._tg_send(event, path)
+        if sent is None:
+            try:
+                await event.send(MessageChain([Image.fromFileSystem(str(path))]))
+            except Exception as e:
+                return f"图做好了但发送失败（{e}），别再画了。"
+        elif not sent:
+            return f"图做好了但发送失败（{self._tg.last_error}），别再画了。"
         event.set_extra(EXTRA_SENT, True)
         return f"已发出「{TEMPLATE_LABELS.get(tpl, tpl)}」贴字表情，不用再描述这张图。"
 
