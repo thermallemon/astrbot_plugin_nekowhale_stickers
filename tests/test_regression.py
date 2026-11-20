@@ -28,6 +28,37 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN_SOURCE = (ROOT / "main.py").read_text(encoding="utf-8")
 
 
+class VersionConsistencyTests(unittest.TestCase):
+    """发版时三处版本号（main.py / fetcher.py / metadata.yaml）必须一起改。"""
+
+    @staticmethod
+    def _python_version(source: str, path: Path) -> str:
+        for line in source.splitlines():
+            if line.startswith("PLUGIN_VERSION = "):
+                return line.split('"', 2)[1]
+        raise AssertionError(f"{path} 里找不到 PLUGIN_VERSION")
+
+    def test_plugin_version_is_consistent_across_entrypoints(self):
+        main_version = self._python_version(MAIN_SOURCE, ROOT / "main.py")
+        fetcher_version = self._python_version(
+            (ROOT / "fetcher.py").read_text(encoding="utf-8"), ROOT / "fetcher.py"
+        )
+        metadata_version = ""
+        for line in (ROOT / "metadata.yaml").read_text(encoding="utf-8").splitlines():
+            if line.startswith("version: "):
+                metadata_version = line.split(":", 1)[1].strip()
+                break
+        self.assertEqual(
+            main_version, fetcher_version, "main.py 与 fetcher.py 的 PLUGIN_VERSION 不一致"
+        )
+        self.assertEqual(
+            main_version, metadata_version, "metadata.yaml 的 version 与代码不一致"
+        )
+        parts = main_version.split(".")
+        self.assertEqual(len(parts), 3, f"版本号不是 x.y.z：{main_version}")
+        self.assertTrue(all(part.isdigit() for part in parts), f"版本号不是 x.y.z：{main_version}")
+
+
 def _ensure_astrbot_logger_stub() -> None:
     """fetcher / render / semantic 只从 astrbot.api 取 logger。
 
@@ -153,6 +184,9 @@ class _Event:
     def is_stopped(self):
         return self.stopped
 
+    def get_platform_name(self):
+        return self.unified_msg_origin.split(":", 1)[0]
+
     async def send(self, chain):
         self.send_calls.append(chain)
         if self.send_error:
@@ -258,6 +292,8 @@ class _Subject:
         self._recent = defaultdict(list)
         self._vector_task = None
         self._build_attempted = True
+        self._tg_auto_busy = False
+        self._tg_auto_task = None
 
     def _cfg(self, key, default=None):
         return self.cfg.get(key, default)
@@ -288,6 +324,9 @@ class _Subject:
 
     async def _after_sent_impl(self, event):
         return await _NS["_after_sent_impl"](self, event)
+
+    def _tg_native(self, event):
+        return bool(getattr(self._tg, "enabled", False)) and TG.is_telegram(event)
 
     def _mode(self):
         return self.cfg.get("mode", "after_send")
@@ -693,12 +732,26 @@ class _TgClient:
         self.delay = delay
         self.calls = []
 
-    async def send_sticker(self, chat_id=None, sticker=None):
+    async def send_sticker(
+        self,
+        chat_id=None,
+        sticker=None,
+        message_thread_id=None,
+        read_timeout=None,
+        write_timeout=None,
+        connect_timeout=None,
+        pool_timeout=None,
+    ):
         self.calls.append(
             {
                 "chat_id": chat_id,
                 "name": getattr(sticker, "name", ""),
                 "readable": hasattr(sticker, "read"),
+                "message_thread_id": message_thread_id,
+                "read_timeout": read_timeout,
+                "write_timeout": write_timeout,
+                "connect_timeout": connect_timeout,
+                "pool_timeout": pool_timeout,
             }
         )
         if self.delay:
@@ -802,7 +855,7 @@ class TgRouteTests(unittest.TestCase):
 
 
 class TgSendTests(unittest.TestCase):
-    """发送三态：None 可回退原路，True/False 都表示已经尝试过、不许补发。"""
+    """发送三态：None = 没发（是否回退由调用方按原生开关决定），True/False 都表示已经尝试过。"""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -827,6 +880,95 @@ class TgSendTests(unittest.TestCase):
         self.assertTrue(client.calls[0]["name"].endswith(".webm"))
         self.assertEqual(bridge.cache_hits, 1)
         self.assertEqual(bridge.last_error, "")
+
+    def test_explicit_timeout_budget_is_bounded_and_passed(self):
+        bridge, _ = self._bridge()
+        client = _TgClient()
+        self.assertTrue(asyncio.run(bridge.send(_TgEvent(chat_id=42, client=client), self.src)))
+        call = client.calls[0]
+        self.assertEqual(call["read_timeout"], TG.SEND_READ_TIMEOUT)
+        self.assertEqual(call["write_timeout"], TG.SEND_WRITE_TIMEOUT)
+        self.assertEqual(call["connect_timeout"], TG.SEND_CONNECT_TIMEOUT)
+        self.assertEqual(call["pool_timeout"], TG.SEND_POOL_TIMEOUT)
+        inner = (
+            TG.SEND_READ_TIMEOUT
+            + TG.SEND_WRITE_TIMEOUT
+            + TG.SEND_CONNECT_TIMEOUT
+            + TG.SEND_POOL_TIMEOUT
+        )
+        self.assertGreater(bridge.send_timeout, inner)
+
+    def test_timeout_is_reported_unconfirmed_without_raw_text(self):
+        bridge, _ = self._bridge()
+        client = _TgClient(error=asyncio.TimeoutError("chat 123 secret"))
+        sent = asyncio.run(bridge.send(_TgEvent(client=client), self.src))
+        self.assertIs(sent, False)
+        self.assertIn("超时", bridge.last_error)
+        self.assertIn("未确认", bridge.last_error)
+        self.assertNotIn("secret", bridge.last_error)
+        self.assertNotIn("123", bridge.last_error)
+
+    def test_narrow_old_client_without_timeout_kwargs_still_works(self):
+        class _Narrow:
+            def __init__(self):
+                self.calls = []
+
+            async def send_sticker(self, chat_id=None, sticker=None):
+                self.calls.append(chat_id)
+                return {"message_id": 1}
+
+        bridge, _ = self._bridge()
+        client = _Narrow()
+        self.assertTrue(asyncio.run(bridge.send(_TgEvent(chat_id=7, client=client), self.src)))
+        self.assertEqual(client.calls, [7])
+
+    def test_chat_thread_suffix_is_passed_to_send_sticker(self):
+        bridge, _ = self._bridge()
+        client = _TgClient()
+        self.assertTrue(asyncio.run(bridge.send(_TgEvent(chat_id="123#7", client=client), self.src)))
+        self.assertEqual(client.calls[0]["chat_id"], "123")
+        self.assertEqual(client.calls[0]["message_thread_id"], 7)
+
+    def test_raw_topic_message_thread_is_preserved(self):
+        bridge, _ = self._bridge()
+        client = _TgClient()
+        event = _TgEvent(chat_id=123, client=client)
+        event.message_obj = SimpleNamespace(
+            raw_message=SimpleNamespace(
+                effective_message=SimpleNamespace(is_topic_message=True, message_thread_id=42)
+            )
+        )
+        self.assertTrue(asyncio.run(bridge.send(event, self.src)))
+        self.assertEqual(client.calls[0]["message_thread_id"], 42)
+
+    def test_forum_general_topic_one_is_not_sent(self):
+        bridge, _ = self._bridge()
+        client = _TgClient()
+        event = _TgEvent(chat_id=123, client=client)
+        event.message_obj = SimpleNamespace(
+            raw_message=SimpleNamespace(
+                effective_message=SimpleNamespace(
+                    is_topic_message=True,
+                    message_thread_id=1,
+                    chat=SimpleNamespace(is_forum=True),
+                )
+            )
+        )
+        self.assertTrue(asyncio.run(bridge.send(event, self.src)))
+        self.assertIsNone(client.calls[0]["message_thread_id"])
+
+    def test_unreliable_topic_is_not_sent_and_does_not_guess_main_group(self):
+        bridge, _ = self._bridge()
+        client = _TgClient()
+        event = _TgEvent(chat_id=123, client=client)
+        event.message_obj = SimpleNamespace(
+            raw_message=SimpleNamespace(
+                effective_message=SimpleNamespace(is_topic_message=True)
+            )
+        )
+        self.assertIsNone(asyncio.run(bridge.send(event, self.src)))
+        self.assertEqual(client.calls, [])
+        self.assertIn("话题", bridge.last_error)
 
     def test_send_failure_returns_false_without_retry(self):
         bridge, _ = self._bridge()
@@ -881,9 +1023,9 @@ class TgSendTests(unittest.TestCase):
         src = self.dir / "picky.png"
         Image.new("RGBA", (40, 40), (30, 60, 90, 0)).save(src)
         bridge = TG.TgStickerBridge(self.dir / "cache")
-        # None = 一个字节都没发出去，外层可以安全走普通图片，也不算成功
+        # None = 一个字节都没发出去，也没有落后 GIF 的风险；外层按开关决定是否回旧路
         self.assertIsNone(asyncio.run(bridge.send(_TgEvent(client=_Picky()), src)))
-        self.assertIn("不接受文件对象", bridge.last_error)
+        self.assertIn("参数未被 SDK 受理", bridge.last_error)
 
     def test_bogus_configured_ffmpeg_falls_back_to_locate(self):
         if not TG.locate_ffmpeg():
@@ -1145,6 +1287,137 @@ class TgCallPathTests(unittest.TestCase):
         self.assertEqual(subject._recent["telegram:group:1"], [])
         self.assertEqual(subject._cooldown, {})
         self.assertEqual(event.get_result().chain, [])
+
+    def test_deliver_native_none_does_not_fall_back_to_old_gif(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(result=None))
+        self.assertFalse(asyncio.run(subject._deliver(event, self.ITEM)))
+        self.assertEqual(event.send_calls, [])
+        self.assertEqual(subject.context.calls, [])
+        self.assertIn("原生贴纸未发出", subject._skip_reason)
+
+    def test_deliver_native_disabled_still_uses_old_gif(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(result=None, enabled=False))
+        self.assertTrue(asyncio.run(subject._deliver(event, self.ITEM)))
+        self.assertEqual(len(event.send_calls), 1)
+        self.assertEqual(subject.context.calls, [])
+
+    def test_deliver_native_crash_does_not_leak_raw_exception(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(error=RuntimeError("chat 123 token abc")))
+        self.assertFalse(asyncio.run(subject._deliver(event, self.ITEM)))
+        self.assertEqual(event.send_calls, [])
+        self.assertNotIn("abc", subject._skip_reason)
+        self.assertNotIn("chat 123", subject._skip_reason)
+        self.assertIn("RuntimeError", subject._skip_reason)
+
+    def test_inline_native_none_does_not_append_image(self):
+        event = _Event("telegram:group:1")
+        event.get_result = lambda: _Result()
+        event.get_message_str = lambda: "u"
+        subject = self._subject(tg=_TgBridge(result=None))
+        subject._picker = _Picker(result=(self.ITEM, {"stage": "keyword", "sim": 0.5}))
+        asyncio.run(_NS_TOOLS["_inline"](subject, event, {"user_text": "u", "reply_text": "r"}))
+        self.assertEqual(event.get_result().chain, [])
+        self.assertFalse(event.get_extra("_nekowhale_picked"))
+        self.assertEqual(subject._recent["telegram:group:1"], [])
+
+    def test_tool_send_native_none_does_not_fall_back(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(result=None))
+        reply = asyncio.run(_NS_TOOLS["tool_send"](subject, event, "摸鱼"))
+        self.assertIn("没退回旧 GIF", reply)
+        self.assertEqual(event.send_calls, [])
+        self.assertFalse(event.get_extra("_nekowhale_already_sent"))
+
+    def test_tool_render_native_none_does_not_fall_back(self):
+        event = _Event("telegram:group:1")
+        subject = self._subject(tg=_TgBridge(result=None))
+        reply = asyncio.run(_NS_TOOLS["tool_render"](subject, event, "想", "上班", ""))
+        self.assertIn("不退回旧 GIF", reply)
+        self.assertEqual(event.send_calls, [])
+        self.assertFalse(event.get_extra("_nekowhale_already_sent"))
+
+    def test_tool_send_is_not_blocked_by_auto_sticker_busy(self):
+        # 自动贴纸的「同时最多一张」只限制自动路径；LLM 显式调用工具不能被它挡。
+        event = _Event("telegram:group:1")
+        tg = _TgBridge(result=True)
+        subject = self._subject(tg=tg)
+        subject._tg_auto_busy = True
+        reply = asyncio.run(_NS_TOOLS["tool_send"](subject, event, "摸鱼"))
+        self.assertEqual(len(tg.calls), 1)
+        self.assertIn("已", reply)
+        self.assertTrue(event.get_extra("_nekowhale_already_sent"))
+
+    def test_after_sent_inline_mode_runs_for_native_tg(self):
+        event = _Event("telegram:group:1")
+        event.set_extra("_nekowhale_ctx", {"user_text": "u", "reply_text": "r"})
+        tg = _TgBridge(result=True)
+        subject = self._subject(tg=tg, cfg={"mode": "inline"})
+        subject._picker = _Picker(result=(self.ITEM, {"stage": "keyword", "sim": 0.5}))
+        asyncio.run(subject._after_sent_impl(event))
+        self.assertEqual(len(tg.calls), 1)
+        self.assertTrue(event.get_extra("_nekowhale_picked"))
+
+    def test_after_sent_busy_skips_without_queueing(self):
+        event = _Event("telegram:group:1")
+        event.set_extra("_nekowhale_ctx", {"user_text": "u", "reply_text": "r"})
+        tg = _TgBridge(result=True)
+        subject = self._subject(tg=tg)
+        subject._tg_auto_busy = True
+        subject._picker = _Picker(result=(self.ITEM, {"stage": "keyword", "sim": 0.5}))
+        asyncio.run(subject._after_sent_impl(event))
+        self.assertEqual(tg.calls, [])
+        self.assertIsNone(event.get_extra("_nekowhale_picked"))
+        self.assertTrue(subject._tg_auto_busy)
+
+    def test_after_sent_clears_busy_after_success(self):
+        event = _Event("telegram:group:1")
+        event.set_extra("_nekowhale_ctx", {"user_text": "u", "reply_text": "r"})
+        tg = _TgBridge(result=True)
+        subject = self._subject(tg=tg)
+        subject._picker = _Picker(result=(self.ITEM, {"stage": "keyword", "sim": 0.5}))
+        asyncio.run(subject._after_sent_impl(event))
+        self.assertFalse(subject._tg_auto_busy)
+        self.assertIsNone(subject._tg_auto_task)
+
+
+_DECOR = _extract_main_functions("_decorate")
+
+
+class TgNativeDecorTests(unittest.TestCase):
+    """原生开启时，装饰阶段不能 await 贴纸链；普通平台仍走 inline。"""
+
+    class _Subject:
+        def __init__(self, native):
+            self.native = native
+            self.inline_calls = 0
+
+        def _drop_dup_reply(self, event):
+            return False
+
+        def _snapshot(self, event):
+            return {"user_text": "u", "reply_text": "r"}
+
+        def _mode(self):
+            return "inline"
+
+        def _tg_native(self, event):
+            return self.native
+
+        async def _inline(self, event, ctx):
+            self.inline_calls += 1
+
+    def test_native_tg_inline_mode_is_deferred_to_after_send(self):
+        subject = self._Subject(native=True)
+        asyncio.run(_DECOR["_decorate"](subject, object()))
+        self.assertEqual(subject.inline_calls, 0)
+
+    def test_non_native_platform_keeps_inline_path(self):
+        subject = self._Subject(native=False)
+        asyncio.run(_DECOR["_decorate"](subject, object()))
+        self.assertEqual(subject.inline_calls, 1)
 
 
 if __name__ == "__main__":

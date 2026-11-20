@@ -127,7 +127,7 @@ pip install fonttools brotli
 | `meme_enabled` | true | 贴字表情总开关 |
 | `min_sim` | 0.4 | 相似度低于这个值的候选会被标注出来（仍然继续往下走） |
 | `download_concurrency` | 3 | 同时下载几个；网络差可以调成 1 |
-| `tg_native_sticker` | true | 只在 Telegram 生效：把表情转成带透明通道的 WEBM，用 `send_sticker` 发成原生贴纸；本机没有 ffmpeg 时自动退回普通图片，不会假装发成功。QQ 完全不受影响 |
+| `tg_native_sticker` | true | 只在 Telegram 生效：把表情转成带透明通道的 WEBM，用 `send_sticker` 发成原生贴纸（需要本机有 ffmpeg）；开着时找不到 ffmpeg、转码失败或发送失败，这张贴纸就不发，不会退回旧 GIF；关掉则和 QQ 一样直接发图片 / GIF。QQ 完全不受影响 |
 | `tg_ffmpeg_path` | 空 | 留空自动找 ffmpeg（环境变量 `NEKOWHALE_FFMPEG` → PATH → 常见安装路径）；插件不会自己装依赖 |
 
 完整 30 项见插件面板。

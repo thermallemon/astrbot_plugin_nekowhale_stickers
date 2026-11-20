@@ -40,10 +40,10 @@ from .fetcher import FetchError, KitFetcher
 from .render import TEMPLATE_LABELS, TEMPLATES, MemeRenderer, RenderError
 from .semantic import DEFAULT_MIN_SIM, DEFAULT_RECALL_K, SemanticPicker
 from .sticker_index import StickerIndex, norm_packs
-from .tgsticker import TgStickerBridge
+from .tgsticker import TgStickerBridge, is_telegram
 
 PLUGIN_NAME = "astrbot_plugin_nekowhale_stickers"
-PLUGIN_VERSION = "2.3.4"
+PLUGIN_VERSION = "2.3.5"
 SITE = "https://kiriyuki.com"
 
 # 模型自己把表情发出去时会用到的工具名（含 MCP 那边的名字，避免重复发）
@@ -164,6 +164,10 @@ class NekoWhaleStickers(Star):
         self._prefetch_task: asyncio.Task | None = None
         self._refresh_lock: asyncio.Lock | None = None
         self._ready_task: asyncio.Task | None = None
+        # TG 原生自动贴纸的「同时最多一张」闸门：忙时直接跳过本条，不排队、
+        # 不无界 create_task；热载/卸载时由 terminate 取消正在等网络的任务。
+        self._tg_auto_busy = False
+        self._tg_auto_task: asyncio.Task | None = None
 
     # ---------------------------------------------------------------- config
     def _cfg(self, key: str, default: Any) -> Any:
@@ -584,20 +588,36 @@ class NekoWhaleStickers(Star):
         self._skip_reason = "语义向量未就绪且未开启关键词兜底"
         return None, {"stage": "semantic-not-ready"}
 
+    def _tg_native(self, event: AstrMessageEvent) -> bool:
+        """TG 原生贴纸是否启用在这条事件上。
+
+        关闭开关时保持原来的 GIF/Image 路径（已证止血手段）；开启时只对
+        Telegram 生效，QQ 等平台完全不受影响。
+        """
+        try:
+            return bool(getattr(self._tg, "enabled", False)) and is_telegram(event)
+        except Exception:
+            return False
+
     async def _tg_send(self, event: AstrMessageEvent, path: Path) -> bool | None:
-        """TG 原生贴纸分支：None = 没走这条路（可以安全地走原路）。
+        """TG 原生贴纸分支：None = 没发（不代表可以走原路）。
 
         True/False 表示已经向 Telegram 尝试过发送，外层不能再补发一次 Image，
         否则同一条表情会到群里两遍；失败也不记成功，交给调用方如实报错。
+        None 时调用方必须先用 _tg_native(event) 判断：原生开关开着就不要再回退
+        黑底 GIF（那会把失败伪装成成功），只有非 TG 或开关关闭时才走旧路径。
         """
         try:
             return await self._tg.send(event, path)
         except Exception as e:
-            logger.warning(f"[nekowhale] TG 原生贴纸异常，本次不再补发：{e}")
-            self._tg.last_error = str(e)
+            # 异常文本可能带平台对象细节；只记异常类名，避免把 ID/token 写进日志。
+            kind = type(e).__name__
+            logger.warning(f"[nekowhale] TG 原生贴纸异常（{kind}），本次不补发")
+            self._tg.last_error = f"原生贴纸异常：{kind}"
             return False
 
     async def _deliver(self, event: AstrMessageEvent, item: dict[str, Any]) -> bool:
+        native = self._tg_native(event)
         try:
             path = await self._kit.ensure_sticker(item)
         except Exception as e:
@@ -609,6 +629,14 @@ class NekoWhaleStickers(Star):
             if not sent:
                 self._skip_reason = f"TG 贴纸发送失败：{self._tg.last_error}"
             return sent
+        if native:
+            # 原生开关开着但编码/路由/参数失败：不退回黑底 GIF，也不伪装成功。
+            self._skip_reason = f"TG 原生贴纸未发出：{self._tg.last_error or '不可用'}"
+            logger.warning(
+                f"[nekowhale] TG 原生贴纸未发出（{self._tg.last_error or '不可用'}），"
+                "这张不退回旧 GIF"
+            )
+            return False
         chain = MessageChain([Image.fromFileSystem(str(path))])
         umo = event.unified_msg_origin
         errors: list[str] = []
@@ -682,7 +710,10 @@ class NekoWhaleStickers(Star):
             ctx = self._snapshot(event)
             if ctx is None:
                 return
-            if self._mode() == "inline":
+            # TG 原生自动贴纸固定走发送后的 after_message_sent：
+            # 正文先由框架发出，贴纸的下载/转码/网络超时再慢也拖不住普通消息。
+            # 只有非 TG 或原生开关关闭时才保留 inline 的图文一起发。
+            if self._mode() == "inline" and not self._tg_native(event):
                 await self._inline(event, ctx)
         except Exception:
             logger.exception("[nekowhale] 装饰失败")
@@ -737,6 +768,14 @@ class NekoWhaleStickers(Star):
                 self._skip_reason = f"TG 贴纸发送失败：{self._tg.last_error}"
                 logger.warning(f"[nekowhale] {umo} 原生贴纸没发出去，本轮不补发")
                 return
+        elif self._tg_native(event):
+            # 原生开关开着却编码/路由/参数失败：不能悄悄退回黑底 GIF。
+            self._skip_reason = f"TG 原生贴纸未发出：{self._tg.last_error or '不可用'}"
+            logger.warning(
+                f"[nekowhale] {umo} 原生贴纸未发出（{self._tg.last_error or '不可用'}），"
+                "本轮不退回旧 GIF"
+            )
+            return
         else:
             result.chain.append(Image.fromFileSystem(str(path)))
         self._recent[umo].append(str(item["id"]))
@@ -760,33 +799,51 @@ class NekoWhaleStickers(Star):
             # 默认级别不打日志，排查时把日志调到 DEBUG 就能看到。
             logger.debug("[nekowhale] 跳过（这一轮没有可配图的回复正文）")
             return
-        if self._mode() != "after_send":
+        native = self._tg_native(event)
+        if not native and self._mode() != "after_send":
             return
-        self._skip_reason = "无"
-        if self._should_skip(event):
-            logger.debug(f"[nekowhale] 跳过（{self._skip_reason}）")
-            return
-        if not self._roll():
-            logger.debug("[nekowhale] 跳过（概率没中）")
-            return
-        umo = event.unified_msg_origin
-        if self._cooldown_blocked(umo):
-            logger.info(f"[nekowhale] {umo} 跳过（最小间隔，还剩 {self._cooldown_remain} 条回复不配图）")
-            return
-        started = time.time()
-        item, info = await self._choose(umo, ctx["user_text"], ctx["reply_text"])
-        if item is None:
-            logger.info(
-                f"[nekowhale] {umo} 跳过（{info.get('stage')}, "
-                f"sim={info.get('sim')}, {int((time.time() - started) * 1000)}ms）"
-            )
-            return
-        if not await self._deliver(event, item):
-            return
-        self._recent[umo].append(str(item["id"]))
-        self._cooldown[umo] = self._cooldown_count()
-        event.set_extra(EXTRA_PICKED, True)
-        self._log_pick(umo, item, info)
+        if native:
+            # 同一时间只允许一张自动原生贴纸。忙就跳过这一条，不排队、
+            # 不无限 create_task：慢转码/网络超时只会影响这一条，不会积压。
+            if self._tg_auto_busy:
+                logger.info("[nekowhale] TG 原生贴纸忙，本条跳过（不排队）")
+                return
+            self._tg_auto_busy = True
+            try:
+                self._tg_auto_task = asyncio.current_task()
+            except RuntimeError:
+                self._tg_auto_task = None
+        try:
+            self._skip_reason = "无"
+            if self._should_skip(event):
+                logger.debug(f"[nekowhale] 跳过（{self._skip_reason}）")
+                return
+            if not self._roll():
+                logger.debug("[nekowhale] 跳过（概率没中）")
+                return
+            umo = event.unified_msg_origin
+            if self._cooldown_blocked(umo):
+                logger.info(f"[nekowhale] {umo} 跳过（最小间隔，还剩 {self._cooldown_remain} 条回复不配图）")
+                return
+            started = time.time()
+            item, info = await self._choose(umo, ctx["user_text"], ctx["reply_text"])
+            if item is None:
+                logger.info(
+                    f"[nekowhale] {umo} 跳过（{info.get('stage')}, "
+                    f"sim={info.get('sim')}, {int((time.time() - started) * 1000)}ms）"
+                )
+                return
+            # 正文此时已经由框架发出；这里慢只影响贴纸，不影响普通消息。
+            if not await self._deliver(event, item):
+                return
+            self._recent[umo].append(str(item["id"]))
+            self._cooldown[umo] = self._cooldown_count()
+            event.set_extra(EXTRA_PICKED, True)
+            self._log_pick(umo, item, info)
+        finally:
+            if native:
+                self._tg_auto_busy = False
+                self._tg_auto_task = None
 
     def _log_pick(self, umo: str, item: dict[str, Any], info: dict[str, Any]) -> None:
         why = info.get("why") or ""
@@ -961,6 +1018,12 @@ class NekoWhaleStickers(Star):
         if sent is False:
             yield event.plain_result(f"图做好了但发送失败（{self._tg.last_error}）")
             return
+        if self._tg_native(event):
+            # 原生开关开着却连转码/路由都没过：明说没发，不退回黑底 GIF。
+            yield event.plain_result(
+                f"图做好了但原生贴纸没发出去（{self._tg.last_error or '未发出'}），不退回旧 GIF。"
+            )
+            return
         yield event.image_result(str(path))
 
     # ------------------------------------------------------------ llm tools
@@ -1024,6 +1087,12 @@ class NekoWhaleStickers(Star):
             return f"这张表情下载失败了（{e}），这次别发图，正常回话。"
         sent = await self._tg_send(event, path)
         if sent is None:
+            if self._tg_native(event):
+                # 原生贴纸开了就不退回旧 GIF，也不假装已经发出。
+                return (
+                    f"发图失败（{self._tg.last_error or '原生贴纸未发出'}），"
+                    "没退回旧 GIF，别重试，正常回话。"
+                )
             try:
                 await event.send(MessageChain([Image.fromFileSystem(str(path))]))
             except Exception as e:
@@ -1100,6 +1169,11 @@ class NekoWhaleStickers(Star):
             return f"画不出来（{e}），别重试。"
         sent = await self._tg_send(event, path)
         if sent is None:
+            if self._tg_native(event):
+                return (
+                    f"图做好了但原生贴纸没发出去（{self._tg.last_error or '未发出'}），"
+                    "不退回旧 GIF，别再画了。"
+                )
             try:
                 await event.send(MessageChain([Image.fromFileSystem(str(path))]))
             except Exception as e:
@@ -1151,7 +1225,13 @@ class NekoWhaleStickers(Star):
         return None
 
     async def terminate(self):
-        for task in (self._warm_task, self._vector_task, self._prefetch_task, self._ready_task):
+        for task in (
+            self._warm_task,
+            self._vector_task,
+            self._prefetch_task,
+            self._ready_task,
+            self._tg_auto_task,
+        ):
             if task and not task.done():
                 task.cancel()
         logger.info("[nekowhale] 已卸载")

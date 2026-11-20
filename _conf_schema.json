@@ -147,7 +147,7 @@
   "tg_native_sticker": {
     "type": "bool",
     "description": "Telegram 用原生贴纸发送",
-    "hint": "开：在 Telegram 里把表情转成带透明通道的 WEBM，用 send_sticker 发成原生贴纸（需要本机有 ffmpeg，找不到就自动退回普通图片，不会报成功）。关：和 QQ 一样直接发图片/GIF。QQ 不受这个开关影响。",
+    "hint": "开：在 Telegram 里把表情转成带透明通道的 WEBM，用 send_sticker 发成原生贴纸（需要本机有 ffmpeg；找不到 ffmpeg、转码失败或发送失败时这张不发，不会退回旧 GIF）。关：和 QQ 一样直接发图片/GIF。QQ 不受这个开关影响。",
     "default": true
   },
   "tg_ffmpeg_path": {
